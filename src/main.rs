@@ -17,13 +17,62 @@ struct Args {
     #[arg(short, long)]
     output: String,
 
-    /// Reduction ratio (0.0 to 1.0)
+    /// Reduction ratio (0.0 to 1.0). Used if target-tris is not specified.
     #[arg(short, long, default_value_t = 0.5)]
     ratio: f32,
 
-    /// Use UE5 surface area preservation
+    /// Target number of triangles.
+    #[arg(long)]
+    target_tris: Option<u32>,
+
+    /// Target number of vertices.
+    #[arg(long)]
+    target_verts: Option<u32>,
+
+    /// Target error.
+    #[arg(long, default_value_t = 0.0)]
+    target_error: f32,
+
+    /// Limit number of vertices.
+    #[arg(long, default_value_t = 0)]
+    limit_verts: u32,
+
+    /// Limit number of triangles.
+    #[arg(long, default_value_t = 0)]
+    limit_tris: u32,
+
+    /// Limit error.
+    #[arg(long, default_value_t = 1e10)]
+    limit_error: f32,
+
+    /// Edge weight (UE5 default 8.0).
+    #[arg(long, default_value_t = 8.0)]
+    edge_weight: f32,
+
+    /// Max edge length factor (0.0 to disable).
+    #[arg(long, default_value_t = 0.0)]
+    max_edge_length_factor: f32,
+
+    /// Use UE5 surface area preservation.
     #[arg(short, long, default_value_t = true)]
     preserve: bool,
+}
+
+impl Args {
+    fn to_simplify_settings(&self, original_tris: u32) -> SimplifySettings {
+        let target_tris = self.target_tris.unwrap_or(((original_tris as f32) * self.ratio) as u32);
+        SimplifySettings {
+            target_num_verts: self.target_verts.unwrap_or(0),
+            target_num_tris: target_tris,
+            target_error: self.target_error,
+            limit_num_verts: self.limit_verts,
+            limit_num_tris: self.limit_tris,
+            limit_error: self.limit_error,
+            edge_weight: self.edge_weight,
+            max_edge_length_factor: self.max_edge_length_factor,
+            preserve_surface_area: self.preserve,
+        }
+    }
 }
 
 unsafe extern "C" fn cli_log_callback(msg: *const c_char) {
@@ -67,8 +116,8 @@ fn save_obj(path: &Path, verts: &[f32], indexes: &[u32]) {
     }
 }
 
-fn handle_glb(input: &str, output: &str, ratio: f32, preserve: bool) {
-    let (document, buffers, _) = gltf::import(input).expect("Failed to load GLB");
+fn handle_glb(args: &Args) {
+    let (document, buffers, _) = gltf::import(&args.input).expect("Failed to load GLB");
     
     for mesh in document.meshes() {
         for primitive in mesh.primitives() {
@@ -84,14 +133,9 @@ fn handle_glb(input: &str, output: &str, ratio: f32, preserve: bool) {
             };
             let mut materials = vec![0i32; indexes.len() / 3];
 
-            let target_tris = ((indexes.len() / 3) as f32 * ratio) as u32;
-            let settings = SimplifySettings {
-                target_num_tris: target_tris,
-                preserve_surface_area: preserve,
-                ..SimplifySettings::default()
-            };
+            let settings = args.to_simplify_settings(indexes.len() as u32 / 3);
 
-            println!("Simplifying GLB Primitive: {} -> {} triangles", indexes.len() / 3, target_tris);
+            println!("Simplifying GLB Primitive: {} -> {} triangles", indexes.len() / 3, settings.target_num_tris);
 
             let attribute_weights = vec![];
             unsafe {
@@ -107,9 +151,9 @@ fn handle_glb(input: &str, output: &str, ratio: f32, preserve: bool) {
                 );
             }
 
-            let out_path = Path::new(output);
+            let out_path = Path::new(&args.output);
             save_obj(out_path, &verts, &indexes);
-            println!("Saved simplified mesh to {} (OBJ format)", output);
+            println!("Saved simplified mesh to {} (OBJ format)", args.output);
             return;
         }
     }
@@ -126,15 +170,9 @@ fn main() {
 
     if ext.to_lowercase() == "obj" {
         let (mut verts, mut indexes, mut materials) = load_obj(input_path);
-        let target_tris = ((indexes.len() / 3) as f32 * args.ratio) as u32;
-        
-        let settings = SimplifySettings {
-            target_num_tris: target_tris,
-            preserve_surface_area: args.preserve,
-            ..SimplifySettings::default()
-        };
+        let settings = args.to_simplify_settings(indexes.len() as u32 / 3);
 
-        println!("Simplifying OBJ: {} -> {} triangles", indexes.len() / 3, target_tris);
+        println!("Simplifying OBJ: {} -> {} triangles", indexes.len() / 3, settings.target_num_tris);
 
         let attribute_weights = vec![];
         unsafe {
@@ -153,7 +191,7 @@ fn main() {
         save_obj(Path::new(&args.output), &verts, &indexes);
         println!("Saved simplified OBJ to {}", args.output);
     } else if ext.to_lowercase() == "glb" || ext.to_lowercase() == "gltf" {
-        handle_glb(&args.input, &args.output, args.ratio, args.preserve);
+        handle_glb(&args);
     } else {
         println!("Unsupported format: {}", ext);
     }
