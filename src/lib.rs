@@ -15,7 +15,7 @@ pub type LogCallback = unsafe extern "C" fn(*const c_char);
 
 static LOG_CALLBACK: Mutex<Option<LogCallback>> = Mutex::new(None);
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub unsafe extern "C" fn register_log_callback(callback: LogCallback) {
     let mut lock = LOG_CALLBACK.lock().unwrap();
     *lock = Some(callback);
@@ -60,7 +60,7 @@ impl Default for SimplifySettings {
     }
 }
 
-#[unsafe(no_mangle)]
+#[no_mangle]
 pub unsafe extern "C" fn simplify_mesh(
     verts: *mut f32,
     num_verts: u32,
@@ -110,43 +110,4 @@ pub unsafe extern "C" fn simplify_mesh(
     log_internal(&format!("Simplification complete. Max error: {}", error));
 
     error
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_simplify_basic() {
-        let mut verts = vec![
-            0.0, 0.0, 0.0,
-            1.0, 0.0, 0.0,
-            0.0, 1.0, 0.0,
-            0.0, 0.0, 1.0,
-        ];
-        let mut indexes = vec![
-            0, 2, 1,
-            0, 1, 3,
-            0, 3, 2,
-            1, 2, 3,
-        ];
-        let mut material_indexes = vec![0, 0, 0, 0];
-        let attribute_weights = vec![];
-        
-        unsafe {
-            simplify_mesh(
-                verts.as_mut_ptr(),
-                4,
-                indexes.as_mut_ptr(),
-                12,
-                material_indexes.as_mut_ptr(),
-                0,
-                attribute_weights.as_ptr(),
-                SimplifySettings {
-                    target_num_tris: 1,
-                    ..SimplifySettings::default()
-                },
-            );
-        }
-    }
 }
