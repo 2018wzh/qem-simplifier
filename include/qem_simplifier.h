@@ -10,10 +10,6 @@ constexpr static const int32_t QEM_STATUS_INVALID_ARGUMENT = -1;
 
 constexpr static const int32_t QEM_STATUS_PANIC = -2;
 
-constexpr static const double SMALL_NUMBER = 1e-8;
-
-constexpr static const double KINDA_SMALL_NUMBER = 1e-4;
-
 constexpr static const uint8_t MeshSimplifier_MERGE_MASK = 3;
 
 constexpr static const uint8_t MeshSimplifier_ADJ_TRI_MASK = (1 << 2);
