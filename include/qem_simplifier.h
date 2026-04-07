@@ -10,14 +10,6 @@ constexpr static const int32_t QEM_STATUS_INVALID_ARGUMENT = -1;
 
 constexpr static const int32_t QEM_STATUS_PANIC = -2;
 
-constexpr static const uint8_t MeshSimplifier_MERGE_MASK = 3;
-
-constexpr static const uint8_t MeshSimplifier_ADJ_TRI_MASK = (1 << 2);
-
-constexpr static const uint8_t MeshSimplifier_LOCKED_VERT_MASK = (1 << 3);
-
-constexpr static const uint8_t MeshSimplifier_REMOVE_TRI_MASK = (1 << 4);
-
 using LogCallback = void(*)(const char*);
 
 struct QemSimplifyResult {

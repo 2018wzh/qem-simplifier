@@ -107,11 +107,10 @@ struct WedgeVertex {
 }
 
 impl<'a> MeshSimplifier<'a> {
-    // TODO: Consider use bitflags
-    pub const MERGE_MASK: u8 = 3;
-    pub const ADJ_TRI_MASK: u8 = 1 << 2;
-    pub const LOCKED_VERT_MASK: u8 = 1 << 3;
-    pub const REMOVE_TRI_MASK: u8 = 1 << 4;
+    const MERGE_MASK: u8 = 3;
+    const ADJ_TRI_MASK: u8 = 1 << 2;
+    const LOCKED_VERT_MASK: u8 = 1 << 3;
+    const REMOVE_TRI_MASK: u8 = 1 << 4;
 
     pub fn new(
         vertices: &'a mut [f32],
@@ -1260,7 +1259,7 @@ impl<'a> MeshSimplifier<'a> {
                             if !tri_visited[other_tri as usize]
                                 && !self.tri_removed[other_tri as usize]
                                 && (self.material_ids[other_tri as usize] & 0xffffff)
-                                == shrink_material_index
+                                    == shrink_material_index
                             {
                                 pending_tris.push(other_tri);
                                 tri_visited[other_tri as usize] = true;
