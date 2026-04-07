@@ -84,13 +84,20 @@ struct QemContextState {
     last_result: QemSimplifyResult,
 }
 
-static LAST_SIMPLIFY_RESULT: Mutex<SimplifyResultInfo> = Mutex::new(SimplifyResultInfo {
-    num_verts: 0,
-    num_indexes: 0,
-    num_tris: 0,
-});
+#[derive(Clone, Copy, Debug)]
+struct CoreSimplifySettings {
+    target_num_verts: u32,
+    target_num_tris: u32,
+    target_error: f32,
+    limit_num_verts: u32,
+    limit_num_tris: u32,
+    limit_error: f32,
+    edge_weight: f32,
+    max_edge_length_factor: f32,
+    preserve_surface_area: bool,
+}
 
-impl From<QemSimplifyOptions> for SimplifySettings {
+impl From<QemSimplifyOptions> for CoreSimplifySettings {
     fn from(options: QemSimplifyOptions) -> Self {
         Self {
             target_num_verts: options.target_num_verts,
@@ -114,7 +121,7 @@ fn run_simplify_internal(
     material_indexes: *mut i32,
     num_attributes: u32,
     attribute_weights: *const f32,
-    settings: SimplifySettings,
+    settings: CoreSimplifySettings,
 ) -> Result<(f32, SimplifyResultInfo), i32> {
     if verts.is_null()
         || indexes.is_null()
@@ -244,7 +251,7 @@ pub unsafe extern "C" fn qem_simplify(
     }
 
     let mesh_view = unsafe { *mesh };
-    let settings: SimplifySettings = unsafe { *options }.into();
+    let settings: CoreSimplifySettings = unsafe { *options }.into();
 
     let (status, result) = match run_simplify_internal(
         mesh_view.verts,
@@ -293,102 +300,6 @@ pub fn log_internal(msg: &str) {
                 unsafe {
                     callback(c_str.as_ptr());
                 }
-            }
-        }
-    }
-}
-
-#[repr(C)]
-pub struct SimplifySettings {
-    pub target_num_verts: u32,
-    pub target_num_tris: u32,
-    pub target_error: f32,
-    pub limit_num_verts: u32,
-    pub limit_num_tris: u32,
-    pub limit_error: f32,
-    pub edge_weight: f32,
-    pub max_edge_length_factor: f32,
-    pub preserve_surface_area: bool,
-}
-
-impl Default for SimplifySettings {
-    fn default() -> Self {
-        Self {
-            target_num_verts: 0,
-            target_num_tris: 0,
-            target_error: 0.0,
-            limit_num_verts: 0,
-            limit_num_tris: 0,
-            limit_error: 1e10,
-            edge_weight: 8.0,
-            max_edge_length_factor: 0.0,
-            preserve_surface_area: true,
-        }
-    }
-}
-
-#[no_mangle]
-#[deprecated(
-    since = "0.2.0",
-    note = "Use qem_simplify (ABI v2). This legacy ABI is retained only for internal correctness testing."
-)]
-pub unsafe extern "C" fn simplify_mesh(
-    verts: *mut f32,
-    num_verts: u32,
-    indexes: *mut u32,
-    num_indexes: u32,
-    material_indexes: *mut i32,
-    num_attributes: u32,
-    attribute_weights: *const f32,
-    settings: SimplifySettings,
-) -> f32 {
-    match run_simplify_internal(
-        verts,
-        num_verts,
-        indexes,
-        num_indexes,
-        material_indexes,
-        num_attributes,
-        attribute_weights,
-        settings,
-    ) {
-        Ok((error, info)) => {
-            if let Ok(mut lock) = LAST_SIMPLIFY_RESULT.lock() {
-                *lock = info;
-            }
-            error
-        }
-        Err(code) => {
-            log_internal(&format!("Legacy simplify_mesh failed. status={}", code));
-            0.0
-        }
-    }
-}
-
-#[no_mangle]
-#[deprecated(
-    since = "0.2.0",
-    note = "Use qem_get_last_result (ABI v2). This legacy API is retained only for internal correctness testing."
-)]
-pub unsafe extern "C" fn get_last_simplify_result(
-    out_num_verts: *mut u32,
-    out_num_indexes: *mut u32,
-    out_num_tris: *mut u32,
-) {
-    if let Ok(lock) = LAST_SIMPLIFY_RESULT.lock() {
-        if !out_num_verts.is_null() {
-            unsafe {
-                *out_num_verts = lock.num_verts;
-            }
-        }
-        if !out_num_indexes.is_null() {
-            unsafe {
-                *out_num_indexes = lock.num_indexes;
-            }
-        }
-        if !out_num_tris.is_null() {
-            unsafe {
-                *out_num_tris = lock.num_tris;
             }
         }
     }

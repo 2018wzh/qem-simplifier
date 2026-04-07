@@ -11,7 +11,6 @@ tab_width = 4
 [export]
 include = [
     "LogCallback",
-    "SimplifySettings",
     "QemMeshView",
     "QemSimplifyOptions",
     "QemSimplifyResult",
