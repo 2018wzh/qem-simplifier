@@ -1,8 +1,8 @@
-pub struct FDisjointSet {
+pub struct DisjointSet {
     pub parents: Vec<u32>,
 }
 
-impl FDisjointSet {
+impl DisjointSet {
     pub fn new(n: u32) -> Self {
         Self {
             parents: (0..n).collect(),
@@ -39,7 +39,7 @@ impl FDisjointSet {
         }
     }
 
-    // 1:1 复刻 UE5 的 UnionSequential
+    // 顺序合并：将 i 的根直接指向 j，对应特定拓扑场景下的稳定合并策略。
     pub fn union_sequential(&mut self, i: u32, j: u32) {
         self.parents[i as usize] = j;
     }

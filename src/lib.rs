@@ -1,11 +1,9 @@
-pub mod binary_heap;
-pub mod disjoint_set;
-pub mod hash;
-pub mod math_util;
+pub mod math;
 pub mod quadric;
 pub mod simplifier;
+pub mod util;
 
-use simplifier::FMeshSimplifier;
+use simplifier::MeshSimplifier;
 use std::ffi::c_void;
 use std::ffi::CString;
 use std::os::raw::c_char;
@@ -22,19 +20,19 @@ pub const QEM_STATUS_PANIC: i32 = -2;
 
 #[derive(Clone, Copy, Debug, Default)]
 struct SimplifyResultInfo {
-    num_verts: u32,
-    num_indexes: u32,
-    num_tris: u32,
+    num_vertices: u32,
+    num_indices: u32,
+    num_triangles: u32,
 }
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct QemMeshView {
-    pub verts: *mut f32,
-    pub num_verts: u32,
-    pub indexes: *mut u32,
-    pub num_indexes: u32,
-    pub material_indexes: *mut i32,
+    pub vertices: *mut f32,
+    pub num_vertices: u32,
+    pub indices: *mut u32,
+    pub num_indices: u32,
+    pub material_ids: *mut i32,
     pub num_attributes: u32,
     pub attribute_weights: *const f32,
 }
@@ -42,11 +40,11 @@ pub struct QemMeshView {
 #[repr(C)]
 #[derive(Clone, Copy, Debug)]
 pub struct QemSimplifyOptions {
-    pub target_num_verts: u32,
-    pub target_num_tris: u32,
+    pub target_vertices: u32,
+    pub target_triangles: u32,
     pub target_error: f32,
-    pub limit_num_verts: u32,
-    pub limit_num_tris: u32,
+    pub min_vertices: u32,
+    pub min_triangles: u32,
     pub limit_error: f32,
     pub edge_weight: f32,
     pub max_edge_length_factor: f32,
@@ -56,11 +54,11 @@ pub struct QemSimplifyOptions {
 impl Default for QemSimplifyOptions {
     fn default() -> Self {
         Self {
-            target_num_verts: 0,
-            target_num_tris: 0,
+            target_vertices: 0,
+            target_triangles: 0,
             target_error: 0.0,
-            limit_num_verts: 0,
-            limit_num_tris: 0,
+            min_vertices: 0,
+            min_triangles: 0,
             limit_error: 1e10,
             edge_weight: 8.0,
             max_edge_length_factor: 0.0,
@@ -74,9 +72,9 @@ impl Default for QemSimplifyOptions {
 pub struct QemSimplifyResult {
     pub status: i32,
     pub max_error: f32,
-    pub num_verts: u32,
-    pub num_indexes: u32,
-    pub num_tris: u32,
+    pub num_vertices: u32,
+    pub num_indices: u32,
+    pub num_triangles: u32,
 }
 
 #[derive(Debug, Default)]
@@ -86,11 +84,11 @@ struct QemContextState {
 
 #[derive(Clone, Copy, Debug)]
 struct CoreSimplifySettings {
-    target_num_verts: u32,
-    target_num_tris: u32,
+    target_vertices: u32,
+    target_triangles: u32,
     target_error: f32,
-    limit_num_verts: u32,
-    limit_num_tris: u32,
+    min_vertices: u32,
+    min_triangles: u32,
     limit_error: f32,
     edge_weight: f32,
     max_edge_length_factor: f32,
@@ -100,11 +98,11 @@ struct CoreSimplifySettings {
 impl From<QemSimplifyOptions> for CoreSimplifySettings {
     fn from(options: QemSimplifyOptions) -> Self {
         Self {
-            target_num_verts: options.target_num_verts,
-            target_num_tris: options.target_num_tris,
+            target_vertices: options.target_vertices,
+            target_triangles: options.target_triangles,
             target_error: options.target_error,
-            limit_num_verts: options.limit_num_verts,
-            limit_num_tris: options.limit_num_tris,
+            min_vertices: options.min_vertices,
+            min_triangles: options.min_triangles,
             limit_error: options.limit_error,
             edge_weight: options.edge_weight,
             max_edge_length_factor: options.max_edge_length_factor,
@@ -114,46 +112,46 @@ impl From<QemSimplifyOptions> for CoreSimplifySettings {
 }
 
 fn run_simplify_internal(
-    verts: *mut f32,
-    num_verts: u32,
-    indexes: *mut u32,
-    num_indexes: u32,
-    material_indexes: *mut i32,
+    vertices: *mut f32,
+    num_vertices: u32,
+    indices: *mut u32,
+    num_indices: u32,
+    material_ids: *mut i32,
     num_attributes: u32,
     attribute_weights: *const f32,
     settings: CoreSimplifySettings,
 ) -> Result<(f32, SimplifyResultInfo), i32> {
-    if verts.is_null()
-        || indexes.is_null()
-        || material_indexes.is_null()
-        || num_verts == 0
-        || num_indexes == 0
-        || num_indexes % 3 != 0
+    if vertices.is_null()
+        || indices.is_null()
+        || material_ids.is_null()
+        || num_vertices == 0
+        || num_indices == 0
+        || num_indices % 3 != 0
         || (num_attributes > 0 && attribute_weights.is_null())
     {
         return Err(QEM_STATUS_INVALID_ARGUMENT);
     }
 
     let run_result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| unsafe {
-        let verts_slice =
-            slice::from_raw_parts_mut(verts, (num_verts * (3 + num_attributes)) as usize);
-        let indexes_slice = slice::from_raw_parts_mut(indexes, num_indexes as usize);
-        let material_indexes_slice =
-            slice::from_raw_parts_mut(material_indexes, (num_indexes / 3) as usize);
+        let vertices_slice =
+            slice::from_raw_parts_mut(vertices, (num_vertices * (3 + num_attributes)) as usize);
+        let indices_slice = slice::from_raw_parts_mut(indices, num_indices as usize);
+        let material_ids_slice =
+            slice::from_raw_parts_mut(material_ids, (num_indices / 3) as usize);
         let attribute_weights_slice =
             slice::from_raw_parts(attribute_weights, num_attributes as usize);
 
         log_internal(&format!(
-            "Starting mesh simplification: target_tris={}",
-            settings.target_num_tris
+            "Starting mesh simplification: target_triangles={}",
+            settings.target_triangles
         ));
 
-        let mut simplifier = FMeshSimplifier::new(
-            verts_slice,
-            num_verts,
-            indexes_slice,
-            num_indexes,
-            material_indexes_slice,
+        let mut simplifier = MeshSimplifier::new(
+            vertices_slice,
+            num_vertices,
+            indices_slice,
+            num_indices,
+            material_ids_slice,
             num_attributes,
             attribute_weights_slice,
         );
@@ -162,11 +160,11 @@ fn run_simplify_internal(
         simplifier.max_edge_length_factor = settings.max_edge_length_factor;
 
         let error = simplifier.simplify(
-            settings.target_num_verts,
-            settings.target_num_tris,
+            settings.target_vertices,
+            settings.target_triangles,
             settings.target_error,
-            settings.limit_num_verts,
-            settings.limit_num_tris,
+            settings.min_vertices,
+            settings.min_triangles,
             settings.limit_error,
         );
 
@@ -175,8 +173,8 @@ fn run_simplify_internal(
             simplifier.preserve_surface_area();
         }
 
-        let final_num_verts = simplifier.remaining_num_verts;
-        let final_num_tris = simplifier.remaining_num_tris;
+        let final_vertex_count = simplifier.remaining_vertices;
+        let final_triangle_count = simplifier.remaining_triangles;
 
         log_internal("Compacting mesh...");
         simplifier.compact();
@@ -186,9 +184,9 @@ fn run_simplify_internal(
         (
             error,
             SimplifyResultInfo {
-                num_verts: final_num_verts,
-                num_tris: final_num_tris,
-                num_indexes: final_num_tris * 3,
+                num_vertices: final_vertex_count,
+                num_triangles: final_triangle_count,
+                num_indices: final_triangle_count * 3,
             },
         )
     }));
@@ -207,7 +205,7 @@ pub unsafe extern "C" fn register_log_callback(callback: LogCallback) {
 
 #[no_mangle]
 pub extern "C" fn qem_get_abi_version() -> u32 {
-    2
+    3
 }
 
 #[no_mangle]
@@ -254,11 +252,11 @@ pub unsafe extern "C" fn qem_simplify(
     let settings: CoreSimplifySettings = unsafe { *options }.into();
 
     let (status, result) = match run_simplify_internal(
-        mesh_view.verts,
-        mesh_view.num_verts,
-        mesh_view.indexes,
-        mesh_view.num_indexes,
-        mesh_view.material_indexes,
+        mesh_view.vertices,
+        mesh_view.num_vertices,
+        mesh_view.indices,
+        mesh_view.num_indices,
+        mesh_view.material_ids,
         mesh_view.num_attributes,
         mesh_view.attribute_weights,
         settings,
@@ -268,9 +266,9 @@ pub unsafe extern "C" fn qem_simplify(
             QemSimplifyResult {
                 status: QEM_STATUS_SUCCESS,
                 max_error,
-                num_verts: info.num_verts,
-                num_indexes: info.num_indexes,
-                num_tris: info.num_tris,
+                num_vertices: info.num_vertices,
+                num_indices: info.num_indices,
+                num_triangles: info.num_triangles,
             },
         ),
         Err(code) => (
@@ -278,9 +276,9 @@ pub unsafe extern "C" fn qem_simplify(
             QemSimplifyResult {
                 status: code,
                 max_error: 0.0,
-                num_verts: 0,
-                num_indexes: 0,
-                num_tris: 0,
+                num_vertices: 0,
+                num_indices: 0,
+                num_triangles: 0,
             },
         ),
     };

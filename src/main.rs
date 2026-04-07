@@ -1,19 +1,13 @@
 use clap::Parser;
 use qem_simplifier::{
-    qem_context_create,
-    qem_context_destroy,
-    qem_simplify,
-    register_log_callback,
-    QemMeshView,
-    QemSimplifyOptions,
-    QemSimplifyResult,
-    QEM_STATUS_SUCCESS,
+    qem_context_create, qem_context_destroy, qem_simplify, register_log_callback, QemMeshView,
+    QemSimplifyOptions, QemSimplifyResult, QEM_STATUS_SUCCESS,
 };
-use std::path::Path;
+use std::ffi::CStr;
 use std::fs::File;
 use std::io::{BufWriter, Write};
-use std::ffi::CStr;
 use std::os::raw::c_char;
+use std::path::Path;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -32,29 +26,29 @@ struct Args {
 
     /// Target number of triangles.
     #[arg(long)]
-    target_tris: Option<u32>,
+    target_triangles: Option<u32>,
 
     /// Target number of vertices.
     #[arg(long)]
-    target_verts: Option<u32>,
+    target_vertices: Option<u32>,
 
     /// Target error.
     #[arg(long, default_value_t = 0.0)]
     target_error: f32,
 
-    /// Limit number of vertices.
+    /// Minimum number of vertices.
     #[arg(long, default_value_t = 0)]
-    limit_verts: u32,
+    min_vertices: u32,
 
-    /// Limit number of triangles.
+    /// Minimum number of triangles.
     #[arg(long, default_value_t = 0)]
-    limit_tris: u32,
+    min_triangles: u32,
 
     /// Limit error.
     #[arg(long, default_value_t = 1e10)]
     limit_error: f32,
 
-    /// Edge weight (UE5 default 8.0).
+    /// Edge weight.
     #[arg(long, default_value_t = 8.0)]
     edge_weight: f32,
 
@@ -62,20 +56,22 @@ struct Args {
     #[arg(long, default_value_t = 0.0)]
     max_edge_length_factor: f32,
 
-    /// Use UE5 surface area preservation.
+    /// Preserve surface area.
     #[arg(short, long, default_value_t = true)]
     preserve: bool,
 }
 
 impl Args {
     fn to_simplify_options(&self, original_tris: u32) -> QemSimplifyOptions {
-        let target_tris = self.target_tris.unwrap_or(((original_tris as f32) * self.ratio) as u32);
+        let target_triangles = self
+            .target_triangles
+            .unwrap_or(((original_tris as f32) * self.ratio) as u32);
         QemSimplifyOptions {
-            target_num_verts: self.target_verts.unwrap_or(0),
-            target_num_tris: target_tris,
+            target_vertices: self.target_vertices.unwrap_or(0),
+            target_triangles,
             target_error: self.target_error,
-            limit_num_verts: self.limit_verts,
-            limit_num_tris: self.limit_tris,
+            min_vertices: self.min_vertices,
+            min_triangles: self.min_triangles,
             limit_error: self.limit_error,
             edge_weight: self.edge_weight,
             max_edge_length_factor: self.max_edge_length_factor,
@@ -85,9 +81,9 @@ impl Args {
 }
 
 fn simplify_with_v2(
-    verts: &mut Vec<f32>,
-    indexes: &mut Vec<u32>,
-    materials: &mut Vec<i32>,
+    vertices: &mut Vec<f32>,
+    indices: &mut Vec<u32>,
+    material_ids: &mut Vec<i32>,
     settings: QemSimplifyOptions,
 ) {
     let context = qem_context_create();
@@ -96,11 +92,11 @@ fn simplify_with_v2(
     }
 
     let mut mesh = QemMeshView {
-        verts: verts.as_mut_ptr(),
-        num_verts: (verts.len() / 3) as u32,
-        indexes: indexes.as_mut_ptr(),
-        num_indexes: indexes.len() as u32,
-        material_indexes: materials.as_mut_ptr(),
+        vertices: vertices.as_mut_ptr(),
+        num_vertices: (vertices.len() / 3) as u32,
+        indices: indices.as_mut_ptr(),
+        num_indices: indices.len() as u32,
+        material_ids: material_ids.as_mut_ptr(),
         num_attributes: 0,
         attribute_weights: std::ptr::null(),
     };
@@ -117,9 +113,9 @@ fn simplify_with_v2(
         );
     }
 
-    verts.truncate(result.num_verts as usize * 3);
-    indexes.truncate(result.num_indexes as usize);
-    materials.truncate(result.num_tris as usize);
+    vertices.truncate(result.num_vertices as usize * 3);
+    indices.truncate(result.num_indices as usize);
+    material_ids.truncate(result.num_triangles as usize);
 }
 
 unsafe extern "C" fn cli_log_callback(msg: *const c_char) {
@@ -130,64 +126,68 @@ unsafe extern "C" fn cli_log_callback(msg: *const c_char) {
 
 fn load_obj(path: &Path) -> (Vec<f32>, Vec<u32>, Vec<i32>) {
     let (models, _) = tobj::load_obj(path, &tobj::GPU_LOAD_OPTIONS).expect("Failed to load OBJ");
-    let mut all_verts = Vec::new();
-    let mut all_indexes = Vec::new();
-    let mut all_materials = Vec::new();
+    let mut all_vertices = Vec::new();
+    let mut all_indices = Vec::new();
+    let mut all_material_ids = Vec::new();
 
     for model in models {
         let mesh = model.mesh;
-        let offset = (all_verts.len() / 3) as u32;
-        all_verts.extend(mesh.positions);
-        
+        let offset = (all_vertices.len() / 3) as u32;
+        all_vertices.extend(mesh.positions);
+
         let num_tris = mesh.indices.len() / 3;
         for idx in mesh.indices {
-            all_indexes.push(idx + offset);
+            all_indices.push(idx + offset);
         }
         let material_id = mesh.material_id.unwrap_or(0) as i32;
         for _ in 0..num_tris {
-            all_materials.push(material_id);
+            all_material_ids.push(material_id);
         }
     }
-    (all_verts, all_indexes, all_materials)
+    (all_vertices, all_indices, all_material_ids)
 }
 
-fn save_obj(path: &Path, verts: &[f32], indexes: &[u32]) {
+fn save_obj(path: &Path, vertices: &[f32], indices: &[u32]) {
     let file = File::create(path).expect("Failed to create output file");
     let mut writer = BufWriter::new(file);
 
-    for v in verts.chunks(3) {
+    for v in vertices.chunks(3) {
         writeln!(writer, "v {} {} {}", v[0], v[1], v[2]).unwrap();
     }
-    for i in indexes.chunks(3) {
+    for i in indices.chunks(3) {
         writeln!(writer, "f {} {} {}", i[0] + 1, i[1] + 1, i[2] + 1).unwrap();
     }
 }
 
 fn handle_glb(args: &Args) {
     let (document, buffers, _) = gltf::import(&args.input).expect("Failed to load GLB");
-    
+
     for mesh in document.meshes() {
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-            
-            let mut verts: Vec<f32> = match reader.read_positions() {
+
+            let mut vertices: Vec<f32> = match reader.read_positions() {
                 Some(iter) => iter.flatten().collect(),
                 None => continue,
             };
-            let mut indexes: Vec<u32> = match reader.read_indices() {
+            let mut indices: Vec<u32> = match reader.read_indices() {
                 Some(read) => read.into_u32().collect(),
                 None => continue,
             };
-            let mut materials = vec![0i32; indexes.len() / 3];
+            let mut material_ids = vec![0i32; indices.len() / 3];
 
-            let settings = args.to_simplify_options(indexes.len() as u32 / 3);
+            let settings = args.to_simplify_options(indices.len() as u32 / 3);
 
-            println!("Simplifying GLB Primitive: {} -> {} triangles", indexes.len() / 3, settings.target_num_tris);
+            println!(
+                "Simplifying GLB Primitive: {} -> {} triangles",
+                indices.len() / 3,
+                settings.target_triangles
+            );
 
-            simplify_with_v2(&mut verts, &mut indexes, &mut materials, settings);
+            simplify_with_v2(&mut vertices, &mut indices, &mut material_ids, settings);
 
             let out_path = Path::new(&args.output);
-            save_obj(out_path, &verts, &indexes);
+            save_obj(out_path, &vertices, &indices);
             println!("Saved simplified mesh to {} (OBJ format)", args.output);
             return;
         }
@@ -196,22 +196,31 @@ fn handle_glb(args: &Args) {
 
 fn main() {
     let args = Args::parse();
-    
+
     // Register log callback
-    unsafe { register_log_callback(cli_log_callback); }
+    unsafe {
+        register_log_callback(cli_log_callback);
+    }
 
     let input_path = Path::new(&args.input);
-    let ext = input_path.extension().and_then(|s| s.to_str()).unwrap_or("");
+    let ext = input_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
 
     if ext.to_lowercase() == "obj" {
-        let (mut verts, mut indexes, mut materials) = load_obj(input_path);
-        let settings = args.to_simplify_options(indexes.len() as u32 / 3);
+        let (mut vertices, mut indices, mut material_ids) = load_obj(input_path);
+        let settings = args.to_simplify_options(indices.len() as u32 / 3);
 
-        println!("Simplifying OBJ: {} -> {} triangles", indexes.len() / 3, settings.target_num_tris);
+        println!(
+            "Simplifying OBJ: {} -> {} triangles",
+            indices.len() / 3,
+            settings.target_triangles
+        );
 
-        simplify_with_v2(&mut verts, &mut indexes, &mut materials, settings);
-        
-        save_obj(Path::new(&args.output), &verts, &indexes);
+        simplify_with_v2(&mut vertices, &mut indices, &mut material_ids, settings);
+
+        save_obj(Path::new(&args.output), &vertices, &indices);
         println!("Saved simplified OBJ to {}", args.output);
     } else if ext.to_lowercase() == "glb" || ext.to_lowercase() == "gltf" {
         handle_glb(&args);

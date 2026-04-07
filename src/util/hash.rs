@@ -21,7 +21,7 @@ pub fn murmur32(data: &[u32]) -> u32 {
     murmur_finalize32(hash)
 }
 
-pub struct FHashTable {
+pub struct HashTable {
     hash_size: u32,
     hash_mask: u32,
     index_size: u32,
@@ -29,7 +29,7 @@ pub struct FHashTable {
     next_index: Vec<u32>,
 }
 
-impl FHashTable {
+impl HashTable {
     pub fn new(hash_size: u32, index_size: u32) -> Self {
         assert!(hash_size > 0);
         assert!(hash_size.is_power_of_two());

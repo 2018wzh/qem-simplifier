@@ -1,14 +1,15 @@
 use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
-use crate::math_util::*;
+use crate::math::lup::*;
+use crate::math::*;
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
-pub struct FVector3f {
+pub struct Vec3f {
     pub x: f32,
     pub y: f32,
     pub z: f32,
 }
 
-impl FVector3f {
+impl Vec3f {
     pub const fn new(x: f32, y: f32, z: f32) -> Self {
         Self { x, y, z }
     }
@@ -34,33 +35,33 @@ impl FVector3f {
     }
 }
 
-impl From<FVector3f> for QVec3 {
-    fn from(v: FVector3f) -> Self {
+impl From<Vec3f> for QVec3 {
+    fn from(v: Vec3f) -> Self {
         Self::new(v.x as f64, v.y as f64, v.z as f64)
     }
 }
 
-impl From<QVec3> for FVector3f {
+impl From<QVec3> for Vec3f {
     fn from(v: QVec3) -> Self {
         Self::new(v.x as f32, v.y as f32, v.z as f32)
     }
 }
 
-impl Add for FVector3f {
+impl Add for Vec3f {
     type Output = Self;
     fn add(self, other: Self) -> Self {
         Self::new(self.x + other.x, self.y + other.y, self.z + other.z)
     }
 }
 
-impl Sub for FVector3f {
+impl Sub for Vec3f {
     type Output = Self;
     fn sub(self, other: Self) -> Self {
         Self::new(self.x - other.x, self.y - other.y, self.z - other.z)
     }
 }
 
-impl Mul<f32> for FVector3f {
+impl Mul<f32> for Vec3f {
     type Output = Self;
     fn mul(self, scalar: f32) -> Self {
         Self::new(self.x * scalar, self.y * scalar, self.z * scalar)
@@ -179,7 +180,7 @@ impl Neg for QVec3 {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FEdgeQuadric {
+pub struct EdgeQuadric {
     pub nxx: f64,
     pub nyy: f64,
     pub nzz: f64,
@@ -190,7 +191,7 @@ pub struct FEdgeQuadric {
     pub a: f64,
 }
 
-impl FEdgeQuadric {
+impl EdgeQuadric {
     pub fn zero(&mut self) {
         self.nxx = 0.0;
         self.nyy = 0.0;
@@ -243,7 +244,7 @@ impl FEdgeQuadric {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FQuadric {
+pub struct Quadric {
     pub nxx: f64,
     pub nyy: f64,
     pub nzz: f64,
@@ -255,7 +256,7 @@ pub struct FQuadric {
     pub a: f64,
 }
 
-impl FQuadric {
+impl Quadric {
     pub fn zero(&mut self) {
         self.nxx = 0.0;
         self.nyy = 0.0;
@@ -338,7 +339,7 @@ impl FQuadric {
         q
     }
 
-    pub fn add_assign(&mut self, q: &FQuadric) {
+    pub fn add_assign(&mut self, q: &Quadric) {
         self.nxx += q.nxx;
         self.nyy += q.nyy;
         self.nzz += q.nzz;
@@ -350,7 +351,7 @@ impl FQuadric {
         self.a += q.a;
     }
 
-    pub fn add_edge_quadric(&mut self, eq: &FEdgeQuadric, point: QVec3) {
+    pub fn add_edge_quadric(&mut self, eq: &EdgeQuadric, point: QVec3) {
         let dist = -eq.n.dot(point);
         self.nxx += eq.nxx;
         self.nyy += eq.nyy;
@@ -378,15 +379,15 @@ impl FQuadric {
 }
 
 #[derive(Clone, Debug, Default)]
-pub struct FQuadricAttr {
-    pub base: FQuadric,
+pub struct QuadricAttr {
+    pub base: Quadric,
     pub nv: QVec3,
     pub dv: f64,
     pub g: Vec<QVec3>,
     pub d: Vec<f64>,
 }
 
-impl FQuadricAttr {
+impl QuadricAttr {
     pub fn new(
         p0: QVec3, p1: QVec3, p2: QVec3,
         attr0: &[f32], attr1: &[f32], attr2: &[f32],
@@ -425,7 +426,7 @@ impl FQuadricAttr {
             n.x, n.y, n.z
         ];
         let mut pivot = [0u32; 3];
-        let b_invertible = lup_factorize(&mut a_mat, &mut pivot, 3, 1e-12);
+        let is_invertible = lup_factorize(&mut a_mat, &mut pivot, 3, 1e-12);
 
         qa.g.resize(num_attributes, QVec3::default());
         qa.d.resize(num_attributes, 0.0);
@@ -444,7 +445,7 @@ impl FQuadricAttr {
             if !a2.is_finite() { a2 = 0.0; }
 
             let mut grad = QVec3::default();
-            if b_invertible {
+            if is_invertible {
                 let b = [a1 - a0, a2 - a0, 0.0];
                 let mut grad_arr = [0.0; 3];
                 lup_solve(&a_mat, &pivot, 3, &b, &mut grad_arr);
@@ -533,7 +534,7 @@ impl FQuadricAttr {
         }
     }
 
-    pub fn add(&mut self, q: &FQuadricAttr, point: QVec3, attribute: &[f32], attribute_weights: &[f32], num_attributes: usize) {
+    pub fn add(&mut self, q: &QuadricAttr, point: QVec3, attribute: &[f32], attribute_weights: &[f32], num_attributes: usize) {
         if q.base.a < 1e-12 {
             return;
         }
@@ -615,7 +616,7 @@ impl FQuadricAttr {
 }
 
 #[derive(Default)]
-pub struct FQuadricAttrOptimizer {
+pub struct QuadricAttrOptimizer {
     pub nxx: f64,
     pub nyy: f64,
     pub nzz: f64,
@@ -635,8 +636,8 @@ pub struct FQuadricAttrOptimizer {
     pub bd: QVec3,
 }
 
-impl FQuadricAttrOptimizer {
-    pub fn add_quadric(&mut self, q: &FQuadric) {
+impl QuadricAttrOptimizer {
+    pub fn add_quadric(&mut self, q: &Quadric) {
         self.nxx += q.nxx;
         self.nyy += q.nyy;
         self.nzz += q.nzz;
@@ -646,7 +647,7 @@ impl FQuadricAttrOptimizer {
         self.dn += q.dn;
     }
 
-    pub fn add_quadric_attr(&mut self, q: &FQuadricAttr, num_attributes: usize) {
+    pub fn add_quadric_attr(&mut self, q: &QuadricAttr, num_attributes: usize) {
         if q.base.a < SMALL_NUMBER {
             return;
         }

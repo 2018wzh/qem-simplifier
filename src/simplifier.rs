@@ -1,12 +1,12 @@
-use crate::binary_heap::*;
-use crate::disjoint_set::*;
-use crate::hash::*;
 use crate::log_internal;
 use crate::quadric::*;
+use crate::util::binary_heap::*;
+use crate::util::disjoint_set::*;
+use crate::util::hash::*;
 
 // TODO: Use smallvec to implement TInlineAllocator
 
-pub fn hash_position(position: FVector3f) -> u32 {
+pub fn hash_position(position: Vec3f) -> u32 {
     let mut x_bits = position.x.to_bits();
     let mut y_bits = position.y.to_bits();
     let mut z_bits = position.z.to_bits();
@@ -37,30 +37,30 @@ pub fn cycle3_offset(value: u32, offset: u32) -> u32 {
 }
 
 #[derive(Clone, Copy, Debug)]
-pub struct FPair {
-    pub position0: FVector3f,
-    pub position1: FVector3f,
+pub struct VertexPair {
+    pub position0: Vec3f,
+    pub position1: Vec3f,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub struct FPerMaterialDeltas {
+pub struct MaterialDeltas {
     pub surface_area: f32,
     pub num_tris: i32,
     pub num_disjoint: i32,
 }
 
-pub struct FMeshSimplifier<'a> {
-    pub num_verts: u32,
-    pub num_indexes: u32,
+pub struct MeshSimplifier<'a> {
+    pub vertex_count: u32,
+    pub index_count: u32,
     pub num_attributes: u32,
-    pub num_tris: u32,
+    pub triangle_count: u32,
 
-    pub remaining_num_verts: u32,
-    pub remaining_num_tris: u32,
+    pub remaining_vertices: u32,
+    pub remaining_triangles: u32,
 
-    pub verts: &'a mut [f32],
-    pub indexes: &'a mut [u32],
-    pub material_indexes: &'a mut [i32],
+    pub vertices: &'a mut [f32],
+    pub indices: &'a mut [u32],
+    pub material_ids: &'a mut [i32],
 
     pub attribute_weights: &'a [f32],
     pub edge_weight: f32,
@@ -69,31 +69,31 @@ pub struct FMeshSimplifier<'a> {
     pub limit_error_to_surface_area: bool,
     pub zero_weights: bool,
 
-    pub vert_hash: FHashTable,
-    pub corner_hash: FHashTable,
+    pub vert_hash: HashTable,
+    pub corner_hash: HashTable,
 
     pub vert_ref_count: Vec<u32>,
     pub corner_flags: Vec<u8>,
     pub tri_removed: Vec<bool>,
 
-    pub per_material_deltas: Vec<FPerMaterialDeltas>,
+    pub per_material_deltas: Vec<MaterialDeltas>,
 
-    pub pairs: Vec<FPair>,
-    pub pair_hash0: FHashTable,
-    pub pair_hash1: FHashTable,
-    pub pair_heap: FBinaryHeap<f32, u32>,
+    pub pairs: Vec<VertexPair>,
+    pub pair_hash0: HashTable,
+    pub pair_hash1: HashTable,
+    pub pair_heap: BinaryHeap<f32, u32>,
 
-    pub moved_verts: Vec<u32>,
+    pub moved_vertices: Vec<u32>,
     pub moved_corners: Vec<u32>,
     pub moved_pairs: Vec<u32>,
     pub reevaluate_pairs: Vec<u32>,
 
-    pub tri_quadrics: Vec<FQuadricAttr>,
-    pub edge_quadrics: Vec<FEdgeQuadric>,
+    pub tri_quadrics: Vec<QuadricAttr>,
+    pub edge_quadrics: Vec<EdgeQuadric>,
     pub edge_quadrics_valid: Vec<bool>,
 
     pub wedge_attributes: Vec<f32>,
-    pub wedge_disjoint_set: FDisjointSet,
+    pub wedge_disjoint_set: DisjointSet,
 
     pub degree_limit: i32,
     pub degree_penalty: f32,
@@ -101,12 +101,12 @@ pub struct FMeshSimplifier<'a> {
     pub inversion_penalty: f32,
 }
 
-struct FWedgeVert {
+struct WedgeVertex {
     vert_index: u32,
     adj_tri_index: u32,
 }
 
-impl<'a> FMeshSimplifier<'a> {
+impl<'a> MeshSimplifier<'a> {
     // TODO: Consider use bitflags
     pub const MERGE_MASK: u8 = 3;
     pub const ADJ_TRI_MASK: u8 = 1 << 2;
@@ -114,46 +114,48 @@ impl<'a> FMeshSimplifier<'a> {
     pub const REMOVE_TRI_MASK: u8 = 1 << 4;
 
     pub fn new(
-        verts: &'a mut [f32],
-        num_verts: u32,
-        indexes: &'a mut [u32],
-        num_indexes: u32,
-        material_indexes: &'a mut [i32],
+        vertices: &'a mut [f32],
+        vertex_count: u32,
+        indices: &'a mut [u32],
+        index_count: u32,
+        material_ids: &'a mut [i32],
         num_attributes: u32,
         attribute_weights: &'a [f32],
     ) -> Self {
-        let num_tris = num_indexes / 3;
-        let vert_hash_size = 1 << 16.min((num_verts as f32).log2() as u32);
-        let corner_hash_size = 1 << 16.min((num_indexes as f32).log2() as u32);
-        let mut vert_hash = FHashTable::new(vert_hash_size, num_verts);
-        let corner_hash = FHashTable::new(corner_hash_size, num_indexes);
+        let triangle_count = index_count / 3;
+        let vert_hash_size = 1 << 16.min((vertex_count as f32).log2() as u32);
+        let corner_hash_size = 1 << 16.min((index_count as f32).log2() as u32);
+        let mut vert_hash = HashTable::new(vert_hash_size, vertex_count);
+        let corner_hash = HashTable::new(corner_hash_size, index_count);
 
-        for vert_index in 0..num_verts {
-            let pos = Self::get_position_static(verts, num_attributes, vert_index);
+        for vert_index in 0..vertex_count {
+            let pos = Self::get_position_static(vertices, num_attributes, vert_index);
             vert_hash.add(hash_position(pos), vert_index);
         }
 
-        let vert_ref_count = vec![0u32; num_verts as usize];
-        let corner_flags = vec![0u8; num_indexes as usize];
+        let vert_ref_count = vec![0u32; vertex_count as usize];
+        let corner_flags = vec![0u8; index_count as usize];
 
-        let edge_quadrics = vec![FEdgeQuadric::default(); num_indexes as usize];
-        let edge_quadrics_valid = vec![false; num_indexes as usize];
+        let edge_quadrics = vec![EdgeQuadric::default(); index_count as usize];
+        let edge_quadrics_valid = vec![false; index_count as usize];
 
-        let num_edges_guess = num_indexes.min(3 * num_verts - 6).min(num_tris + num_verts);
+        let num_edges_guess = index_count
+            .min(3 * vertex_count - 6)
+            .min(triangle_count + vertex_count);
         let pair_hash_size = 1 << 16.min((num_edges_guess as f32).log2() as u32);
-        let pair_hash0 = FHashTable::new(pair_hash_size, num_edges_guess);
-        let pair_hash1 = FHashTable::new(pair_hash_size, num_edges_guess);
+        let pair_hash0 = HashTable::new(pair_hash_size, num_edges_guess);
+        let pair_hash1 = HashTable::new(pair_hash_size, num_edges_guess);
 
         let mut simplifier = Self {
-            num_verts,
-            num_indexes,
+            vertex_count,
+            index_count,
             num_attributes,
-            num_tris,
-            remaining_num_verts: num_verts,
-            remaining_num_tris: num_tris,
-            verts,
-            indexes,
-            material_indexes,
+            triangle_count,
+            remaining_vertices: vertex_count,
+            remaining_triangles: triangle_count,
+            vertices,
+            indices,
+            material_ids,
             attribute_weights,
             edge_weight: 8.0,
             max_edge_length_factor: 0.0,
@@ -164,38 +166,38 @@ impl<'a> FMeshSimplifier<'a> {
             corner_hash,
             vert_ref_count,
             corner_flags,
-            tri_removed: vec![false; num_tris as usize],
+            tri_removed: vec![false; triangle_count as usize],
             per_material_deltas: Vec::new(),
             pairs: Vec::with_capacity(num_edges_guess as usize),
             pair_hash0,
             pair_hash1,
-            pair_heap: FBinaryHeap::new(num_edges_guess, num_edges_guess),
-            moved_verts: Vec::new(),
+            pair_heap: BinaryHeap::new(num_edges_guess, num_edges_guess),
+            moved_vertices: Vec::new(),
             moved_corners: Vec::new(),
             moved_pairs: Vec::new(),
             reevaluate_pairs: Vec::new(),
-            tri_quadrics: vec![FQuadricAttr::default(); num_tris as usize],
+            tri_quadrics: vec![QuadricAttr::default(); triangle_count as usize],
             edge_quadrics,
             edge_quadrics_valid,
             wedge_attributes: Vec::new(),
-            wedge_disjoint_set: FDisjointSet::new(0),
+            wedge_disjoint_set: DisjointSet::new(0),
             degree_limit: 24,
             degree_penalty: 0.5,
             lock_penalty: 1e8,
             inversion_penalty: 100.0,
         };
 
-        for corner in 0..num_indexes {
-            let vert_index = simplifier.indexes[corner as usize];
+        for corner in 0..index_count {
+            let vert_index = simplifier.indices[corner as usize];
 
             simplifier.vert_ref_count[vert_index as usize] += 1;
 
             let pos = simplifier.get_position(vert_index);
             simplifier.corner_hash.add(hash_position(pos), corner);
 
-            let mut pair = FPair {
+            let mut pair = VertexPair {
                 position0: pos,
-                position1: simplifier.get_position(simplifier.indexes[cycle3(corner) as usize]),
+                position1: simplifier.get_position(simplifier.indices[cycle3(corner) as usize]),
             };
 
             let pair_index = simplifier.pairs.len() as u32;
@@ -205,41 +207,41 @@ impl<'a> FMeshSimplifier<'a> {
         }
 
         log_internal(&format!(
-            "Simplifier initialized: {} verts, {} tris, {} pairs",
-            num_verts,
-            num_tris,
+            "Simplifier initialized: {} vertices, {} triangles, {} pairs",
+            vertex_count,
+            triangle_count,
             simplifier.pairs.len()
         ));
 
         simplifier
     }
 
-    fn get_position_static(verts: &[f32], num_attributes: u32, vert_index: u32) -> FVector3f {
+    fn get_position_static(vertices: &[f32], num_attributes: u32, vert_index: u32) -> Vec3f {
         let base = (3 + num_attributes) as usize * vert_index as usize;
-        FVector3f::new(verts[base], verts[base + 1], verts[base + 2])
+        Vec3f::new(vertices[base], vertices[base + 1], vertices[base + 2])
     }
 
-    // TODO: Requires unsafe to returning mutable reference. Can be optimized by refering to original UE code
-    pub fn get_position(&self, vert_index: u32) -> FVector3f {
-        Self::get_position_static(self.verts, self.num_attributes, vert_index)
+    // TODO: 当前通过 unsafe 返回连续内存中的 Vec3f 可变引用，后续可进一步封装以减少 unsafe 暴露。
+    pub fn get_position(&self, vert_index: u32) -> Vec3f {
+        Self::get_position_static(self.vertices, self.num_attributes, vert_index)
     }
 
-    pub fn get_position_mut(&mut self, vert_index: u32) -> &mut FVector3f {
+    pub fn get_position_mut(&mut self, vert_index: u32) -> &mut Vec3f {
         let base = (3 + self.num_attributes) as usize * vert_index as usize;
-        unsafe { &mut *(self.verts.as_mut_ptr().add(base) as *mut FVector3f) }
+        unsafe { &mut *(self.vertices.as_mut_ptr().add(base) as *mut Vec3f) }
     }
 
     pub fn get_attributes(&self, vert_index: u32) -> &[f32] {
         let base = (3 + self.num_attributes) as usize * vert_index as usize + 3;
-        &self.verts[base..base + self.num_attributes as usize]
+        &self.vertices[base..base + self.num_attributes as usize]
     }
 
     pub fn get_attributes_mut(&mut self, vert_index: u32) -> &mut [f32] {
         let base = (3 + self.num_attributes) as usize * vert_index as usize + 3;
-        &mut self.verts[base..base + self.num_attributes as usize]
+        &mut self.vertices[base..base + self.num_attributes as usize]
     }
 
-    fn add_unique_pair(&mut self, pair: &mut FPair, pair_index: u32) -> bool {
+    fn add_unique_pair(&mut self, pair: &mut VertexPair, pair_index: u32) -> bool {
         let mut hash0 = hash_position(pair.position0);
         let mut hash1 = hash_position(pair.position1);
 
@@ -263,13 +265,13 @@ impl<'a> FMeshSimplifier<'a> {
         true
     }
 
-    // TODO: Can be optimized by refering to original UE code
+    // TODO: 可进一步优化三角形二次误差计算路径。
     pub fn calc_tri_quadric(&mut self, tri_index: u32) {
-        let i0 = self.indexes[(tri_index * 3 + 0) as usize];
-        let i1 = self.indexes[(tri_index * 3 + 1) as usize];
-        let i2 = self.indexes[(tri_index * 3 + 2) as usize];
+        let i0 = self.indices[(tri_index * 3 + 0) as usize];
+        let i1 = self.indices[(tri_index * 3 + 1) as usize];
+        let i2 = self.indices[(tri_index * 3 + 2) as usize];
 
-        self.tri_quadrics[tri_index as usize] = FQuadricAttr::new(
+        self.tri_quadrics[tri_index as usize] = QuadricAttr::new(
             self.get_position(i0).into(),
             self.get_position(i1).into(),
             self.get_position(i2).into(),
@@ -288,10 +290,10 @@ impl<'a> FMeshSimplifier<'a> {
             return;
         }
 
-        let material_index = self.material_indexes[tri_index as usize];
+        let material_index = self.material_ids[tri_index as usize];
 
-        let vert_index0 = self.indexes[edge_index as usize];
-        let vert_index1 = self.indexes[cycle3(edge_index) as usize];
+        let vert_index0 = self.indices[edge_index as usize];
+        let vert_index1 = self.indices[cycle3(edge_index) as usize];
 
         let position0 = self.get_position(vert_index0);
         let position1 = self.get_position(vert_index1);
@@ -299,12 +301,12 @@ impl<'a> FMeshSimplifier<'a> {
         let hash = hash_position(position1);
         let mut corner = self.corner_hash.first(hash);
         while self.corner_hash.is_valid(corner) {
-            let other_vert_index0 = self.indexes[corner as usize];
-            let other_vert_index1 = self.indexes[cycle3(corner) as usize];
+            let other_vert_index0 = self.indices[corner as usize];
+            let other_vert_index1 = self.indices[cycle3(corner) as usize];
 
             if vert_index0 == other_vert_index1
                 && vert_index1 == other_vert_index0
-                && material_index == self.material_indexes[(corner / 3) as usize]
+                && material_index == self.material_ids[(corner / 3) as usize]
             {
                 self.edge_quadrics_valid[edge_index as usize] = false;
                 return;
@@ -315,8 +317,8 @@ impl<'a> FMeshSimplifier<'a> {
         let mut weight = self.edge_weight;
         corner = self.corner_hash.first(hash);
         while self.corner_hash.is_valid(corner) {
-            let other_vert_index0 = self.indexes[corner as usize];
-            let other_vert_index1 = self.indexes[cycle3(corner) as usize];
+            let other_vert_index0 = self.indices[corner as usize];
+            let other_vert_index1 = self.indices[cycle3(corner) as usize];
 
             if position0 == self.get_position(other_vert_index1)
                 && position1 == self.get_position(other_vert_index0)
@@ -328,15 +330,15 @@ impl<'a> FMeshSimplifier<'a> {
         }
 
         self.edge_quadrics[edge_index as usize] =
-            FEdgeQuadric::new_with_weight(position0.into(), position1.into(), weight);
+            EdgeQuadric::new_with_weight(position0.into(), position1.into(), weight);
         self.edge_quadrics_valid[edge_index as usize] = true;
     }
 
-    pub fn lock_position(&mut self, position: FVector3f) {
+    pub fn lock_position(&mut self, position: Vec3f) {
         let hash = hash_position(position);
         let mut corner = self.corner_hash.first(hash);
         while self.corner_hash.is_valid(corner) {
-            if self.get_position(self.indexes[corner as usize]) == position {
+            if self.get_position(self.indices[corner as usize]) == position {
                 self.corner_flags[corner as usize] |= Self::LOCKED_VERT_MASK;
             }
             corner = self.corner_hash.next(corner);
@@ -344,21 +346,21 @@ impl<'a> FMeshSimplifier<'a> {
     }
 
     #[allow(dead_code)]
-    fn for_all_corners<F>(&self, position: FVector3f, mut func: F)
+    fn for_all_corners<F>(&self, position: Vec3f, mut func: F)
     where
         F: FnMut(u32),
     {
         let hash = hash_position(position);
         let mut corner = self.corner_hash.first(hash);
         while self.corner_hash.is_valid(corner) {
-            if self.get_position(self.indexes[corner as usize]) == position {
+            if self.get_position(self.indices[corner as usize]) == position {
                 func(corner);
             }
             corner = self.corner_hash.next(corner);
         }
     }
 
-    fn for_all_pairs<F>(&self, position: FVector3f, mut func: F)
+    fn for_all_pairs<F>(&self, position: Vec3f, mut func: F)
     where
         F: FnMut(u32),
     {
@@ -382,9 +384,9 @@ impl<'a> FMeshSimplifier<'a> {
 
     pub fn evaluate_merge(
         &mut self,
-        position0: FVector3f,
-        position1: FVector3f,
-        b_move_verts: bool,
+        position0: Vec3f,
+        position1: Vec3f,
+        move_vertices: bool,
     ) -> f32 {
         if position0 == position1 {
             return 0.0;
@@ -392,28 +394,28 @@ impl<'a> FMeshSimplifier<'a> {
 
         self.wedge_disjoint_set.reset();
         let mut adj_tris = Vec::new();
-        let mut wedge_verts0: Vec<FWedgeVert> = Vec::new();
-        let mut wedge_verts1: Vec<FWedgeVert> = Vec::new();
+        let mut wedge_vertices0: Vec<WedgeVertex> = Vec::new();
+        let mut wedge_vertices1: Vec<WedgeVertex> = Vec::new();
         let mut vert_degree = 0;
 
         let mut flags_union0 = 0u32;
         let mut flags_union1 = 0u32;
 
-        for (pos, index, flags_union, wedge_verts) in [
-            (position0, 0, &mut flags_union0, &mut wedge_verts0),
-            (position1, 1, &mut flags_union1, &mut wedge_verts1),
+        for (pos, index, flags_union, wedge_vertices) in [
+            (position0, 0, &mut flags_union0, &mut wedge_vertices0),
+            (position1, 1, &mut flags_union1, &mut wedge_vertices1),
         ] {
             let hash = hash_position(pos);
             let mut corner = self.corner_hash.first(hash);
             while self.corner_hash.is_valid(corner) {
-                if self.get_position(self.indexes[corner as usize]) == pos {
+                if self.get_position(self.indices[corner as usize]) == pos {
                     vert_degree += 1;
                     self.corner_flags[corner as usize] |= 1 << index;
                     *flags_union |= self.corner_flags[corner as usize] as u32;
 
                     let tri_index = corner / 3;
                     let adj_tri_index;
-                    let mut b_new_tri = true;
+                    let mut new_triangle = true;
 
                     let first_corner_flag = &mut self.corner_flags[(tri_index * 3) as usize];
                     if (*first_corner_flag & Self::ADJ_TRI_MASK) == 0 {
@@ -424,12 +426,12 @@ impl<'a> FMeshSimplifier<'a> {
                     } else {
                         adj_tri_index =
                             adj_tris.iter().position(|&x| x == tri_index).unwrap() as u32;
-                        b_new_tri = false;
+                        new_triangle = false;
                     }
 
-                    let vert_index = self.indexes[corner as usize];
+                    let vert_index = self.indices[corner as usize];
                     let mut other_adj_tri_index = u32::MAX;
-                    for wv in wedge_verts.iter() {
+                    for wv in wedge_vertices.iter() {
                         if wv.vert_index == vert_index {
                             other_adj_tri_index = wv.adj_tri_index;
                             break;
@@ -437,12 +439,12 @@ impl<'a> FMeshSimplifier<'a> {
                     }
 
                     if other_adj_tri_index == u32::MAX {
-                        wedge_verts.push(FWedgeVert {
+                        wedge_vertices.push(WedgeVertex {
                             vert_index,
                             adj_tri_index,
                         });
                     } else {
-                        if b_new_tri {
+                        if new_triangle {
                             self.wedge_disjoint_set
                                 .union_sequential(adj_tri_index, other_adj_tri_index);
                         } else {
@@ -459,7 +461,7 @@ impl<'a> FMeshSimplifier<'a> {
             return 0.0;
         }
 
-        if vert_degree as u32 == self.remaining_num_tris * 2 {
+        if vert_degree as u32 == self.remaining_triangles * 2 {
             for &tri_index in &adj_tris {
                 for corner_index in 0..3 {
                     self.corner_flags[(tri_index * 3 + corner_index) as usize] &=
@@ -469,8 +471,8 @@ impl<'a> FMeshSimplifier<'a> {
             return 0.0;
         }
 
-        let b_locked0 = (flags_union0 & Self::LOCKED_VERT_MASK as u32) != 0;
-        let b_locked1 = (flags_union1 & Self::LOCKED_VERT_MASK as u32) != 0;
+        let is_locked0 = (flags_union0 & Self::LOCKED_VERT_MASK as u32) != 0;
+        let is_locked1 = (flags_union1 & Self::LOCKED_VERT_MASK as u32) != 0;
 
         let mut penalty = 0.0f32;
         if vert_degree > self.degree_limit {
@@ -478,14 +480,14 @@ impl<'a> FMeshSimplifier<'a> {
         }
 
         let mut wedge_ids = Vec::new();
-        let mut wedge_quadrics: Vec<FQuadricAttr> = Vec::new();
+        let mut wedge_quadrics: Vec<QuadricAttr> = Vec::new();
 
         for (adj_tri_idx, &tri_index) in adj_tris.iter().enumerate() {
             let tri_quadric = self.tri_quadrics[tri_index as usize].clone();
             let wedge_id = self.wedge_disjoint_set.find(adj_tri_idx as u32);
 
             if let Some(wedge_index) = wedge_ids.iter().position(|&id| id == wedge_id) {
-                let vert_index0 = self.indexes[(tri_index * 3) as usize];
+                let vert_index0 = self.indices[(tri_index * 3) as usize];
                 let pos0 = self.get_position(vert_index0);
                 let attrs0 = self.get_attributes(vert_index0);
                 wedge_quadrics[wedge_index].add(
@@ -498,7 +500,7 @@ impl<'a> FMeshSimplifier<'a> {
             } else {
                 wedge_ids.push(wedge_id);
                 let mut wedge_quadric = tri_quadric;
-                let vert_index0 = self.indexes[(tri_index * 3) as usize];
+                let vert_index0 = self.indices[(tri_index * 3) as usize];
                 let pos0 = self.get_position(vert_index0);
                 let attrs0 = self.get_attributes(vert_index0);
                 wedge_quadric.rebase(
@@ -511,20 +513,20 @@ impl<'a> FMeshSimplifier<'a> {
             }
         }
 
-        let mut quadric_optimizer = FQuadricAttrOptimizer::default();
+        let mut quadric_optimizer = QuadricAttrOptimizer::default();
         for wq in &wedge_quadrics {
             quadric_optimizer.add_quadric_attr(wq, self.num_attributes as usize);
         }
 
-        let mut bounds_min = FVector3f::new(f32::MAX, f32::MAX, f32::MAX);
-        let mut bounds_max = FVector3f::new(f32::MIN, f32::MIN, f32::MIN);
-        let mut edge_quadric = FQuadric::default();
+        let mut bounds_min = Vec3f::new(f32::MAX, f32::MAX, f32::MAX);
+        let mut bounds_max = Vec3f::new(f32::MIN, f32::MIN, f32::MIN);
+        let mut edge_quadric = Quadric::default();
         edge_quadric.zero();
 
         for &tri_index in &adj_tris {
             for corner_index in 0..3 {
                 let corner = tri_index * 3 + corner_index;
-                let pos = self.get_position(self.indexes[corner as usize]);
+                let pos = self.get_position(self.indices[corner as usize]);
                 bounds_min.x = bounds_min.x.min(pos.x);
                 bounds_min.y = bounds_min.y.min(pos.y);
                 bounds_min.z = bounds_min.z.min(pos.z);
@@ -537,7 +539,7 @@ impl<'a> FMeshSimplifier<'a> {
                     edge_flags |=
                         self.corner_flags[(tri_index * 3 + ((1 << corner_index) & 3)) as usize];
                     if (edge_flags & Self::MERGE_MASK) != 0 {
-                        let vert_index0 = self.indexes[corner as usize];
+                        let vert_index0 = self.indices[corner as usize];
                         edge_quadric.add_edge_quadric(
                             &self.edge_quadrics[corner as usize],
                             (self.get_position(vert_index0) - position0).into(),
@@ -549,7 +551,7 @@ impl<'a> FMeshSimplifier<'a> {
 
         quadric_optimizer.add_quadric(&edge_quadric);
         let is_valid_position =
-            |pos: FVector3f, simplifier: &FMeshSimplifier, adj_tris: &Vec<u32>| -> bool {
+            |pos: Vec3f, simplifier: &MeshSimplifier, adj_tris: &Vec<u32>| -> bool {
                 let mut dist_sq = 0.0f32;
                 if pos.x < bounds_min.x {
                     dist_sq += (bounds_min.x - pos.x).powi(2);
@@ -580,19 +582,19 @@ impl<'a> FMeshSimplifier<'a> {
                 true
             };
 
-        let mut final_new_position = FVector3f::default();
+        let mut final_new_position = Vec3f::default();
 
-        if b_locked0 && b_locked1 {
+        if is_locked0 && is_locked1 {
             penalty += self.lock_penalty;
         }
 
         let mut found_pos = false;
-        if b_locked0 && !b_locked1 {
+        if is_locked0 && !is_locked1 {
             final_new_position = position0;
             if !is_valid_position(final_new_position, self, &adj_tris) {
                 penalty += self.inversion_penalty;
             }
-        } else if b_locked1 && !b_locked0 {
+        } else if is_locked1 && !is_locked0 {
             final_new_position = position1;
             if !is_valid_position(final_new_position, self, &adj_tris) {
                 penalty += self.inversion_penalty;
@@ -600,14 +602,14 @@ impl<'a> FMeshSimplifier<'a> {
         } else {
             let mut pos = QVec3::default();
             if quadric_optimizer.optimize_volume(&mut pos) {
-                let p: FVector3f = (pos + position0.into()).into();
+                let p: Vec3f = (pos + position0.into()).into();
                 if is_valid_position(p, self, &adj_tris) {
                     final_new_position = p;
                     found_pos = true;
                 }
             }
             if !found_pos && quadric_optimizer.optimize(&mut pos) {
-                let p: FVector3f = (pos + position0.into()).into();
+                let p: Vec3f = (pos + position0.into()).into();
                 if is_valid_position(p, self, &adj_tris) {
                     final_new_position = p;
                     found_pos = true;
@@ -619,7 +621,7 @@ impl<'a> FMeshSimplifier<'a> {
                     (position1 - position0).into(),
                     &mut pos,
                 ) {
-                    let p: FVector3f = (pos + position0.into()).into();
+                    let p: Vec3f = (pos + position0.into()).into();
                     if is_valid_position(p, self, &adj_tris) {
                         final_new_position = p;
                         found_pos = true;
@@ -641,18 +643,18 @@ impl<'a> FMeshSimplifier<'a> {
 
         let new_position_rebase: QVec3 = (final_new_position - position0).into();
 
-        if b_locked0 != b_locked1 || self.zero_weights {
+        if is_locked0 != is_locked1 || self.zero_weights {
             let dist_sq0 = (final_new_position - position0).length_sq();
             let dist_sq1 = (final_new_position - position1).length_sq();
             let farthest = if dist_sq0 > dist_sq1 { 0 } else { 1 };
 
             for j in 0..2 {
-                let wedge_verts = if ((farthest + j) & 1) == 0 {
-                    &wedge_verts0
+                let wedge_vertices = if ((farthest + j) & 1) == 0 {
+                    &wedge_vertices0
                 } else {
-                    &wedge_verts1
+                    &wedge_vertices1
                 };
-                for wv in wedge_verts {
+                for wv in wedge_vertices {
                     let root_id = self.wedge_disjoint_set.find(wv.adj_tri_index);
                     let wedge_index = wedge_ids.iter().position(|&id| id == root_id).unwrap();
                     let start = wedge_index * self.num_attributes as usize;
@@ -660,7 +662,7 @@ impl<'a> FMeshSimplifier<'a> {
 
                     let base = (3 + self.num_attributes) as usize * wv.vert_index as usize + 3;
                     for i in 0..num_attrs {
-                        self.wedge_attributes[start + i] = self.verts[base + i];
+                        self.wedge_attributes[start + i] = self.vertices[base + i];
                     }
                 }
             }
@@ -679,7 +681,7 @@ impl<'a> FMeshSimplifier<'a> {
 
             if wedge_quadric.base.a > 1e-8 {
                 let mut wedge_error: f64;
-                if b_locked0 != b_locked1 {
+                if is_locked0 != is_locked1 {
                     wedge_error = wedge_quadric.evaluate(
                         new_position_rebase,
                         wedge_attrs,
@@ -722,8 +724,8 @@ impl<'a> FMeshSimplifier<'a> {
                 let index_moved = self.corner_index_moved(tri_index);
                 if index_moved < 3 {
                     let corner = tri_index * 3 + index_moved;
-                    let p1 = self.get_position(self.indexes[cycle3(corner) as usize]);
-                    let p2 = self.get_position(self.indexes[cycle3_offset(corner, 2) as usize]);
+                    let p1 = self.get_position(self.indices[cycle3(corner) as usize]);
+                    let p2 = self.get_position(self.indices[cycle3_offset(corner, 2) as usize]);
                     error = error.max(
                         (final_new_position - p1).length_sq()
                             / (self.max_edge_length_factor * self.max_edge_length_factor),
@@ -736,7 +738,7 @@ impl<'a> FMeshSimplifier<'a> {
             }
         }
 
-        if b_move_verts {
+        if move_vertices {
             self.begin_move_position(position0);
             self.begin_move_position(position1);
 
@@ -746,7 +748,7 @@ impl<'a> FMeshSimplifier<'a> {
 
                 for corner_index in 0..3 {
                     let corner = tri_index * 3 + corner_index;
-                    let vert_index = self.indexes[corner as usize];
+                    let vert_index = self.indices[corner as usize];
                     let old_pos = self.get_position(vert_index);
                     if old_pos == position0 || old_pos == position1 {
                         *self.get_position_mut(vert_index) = final_new_position;
@@ -755,10 +757,10 @@ impl<'a> FMeshSimplifier<'a> {
                             let num_attrs = self.num_attributes as usize;
                             let base = (3 + self.num_attributes) as usize * vert_index as usize + 3;
                             for i in 0..num_attrs {
-                                self.verts[base + i] = self.wedge_attributes[start + i];
+                                self.vertices[base + i] = self.wedge_attributes[start + i];
                             }
                         }
-                        if b_locked0 || b_locked1 {
+                        if is_locked0 || is_locked1 {
                             self.corner_flags[corner as usize] |= Self::LOCKED_VERT_MASK;
                         }
                     }
@@ -777,17 +779,17 @@ impl<'a> FMeshSimplifier<'a> {
 
             self.end_move_positions();
 
-            let mut adj_verts = Vec::new();
+            let mut adjacent_vertices = Vec::new();
             for &tri_index in &adj_tris {
                 for corner_index in 0..3 {
-                    let v_idx = self.indexes[(tri_index * 3 + corner_index) as usize];
-                    if !adj_verts.contains(&v_idx) {
-                        adj_verts.push(v_idx);
+                    let v_idx = self.indices[(tri_index * 3 + corner_index) as usize];
+                    if !adjacent_vertices.contains(&v_idx) {
+                        adjacent_vertices.push(v_idx);
                     }
                 }
             }
 
-            for v_idx in adj_verts {
+            for v_idx in adjacent_vertices {
                 let pos = self.get_position(v_idx);
                 let mut p_to_reevaluate = Vec::new();
                 self.for_all_pairs(pos, |pair_idx| {
@@ -802,11 +804,10 @@ impl<'a> FMeshSimplifier<'a> {
             }
 
             for &tri_index in &adj_tris {
-                let material_index =
-                    (self.material_indexes[tri_index as usize] & 0xffffff) as usize;
+                let material_index = (self.material_ids[tri_index as usize] & 0xffffff) as usize;
                 if material_index >= self.per_material_deltas.len() {
                     self.per_material_deltas
-                        .resize(material_index + 1, FPerMaterialDeltas::default());
+                        .resize(material_index + 1, MaterialDeltas::default());
                 }
                 let old_a = self.tri_quadrics[tri_index as usize].base.a as f32;
                 let delta = &mut self.per_material_deltas[material_index];
@@ -831,7 +832,7 @@ impl<'a> FMeshSimplifier<'a> {
         for &tri_index in &adj_tris {
             for corner_index in 0..3 {
                 let corner = tri_index * 3 + corner_index;
-                if b_move_verts {
+                if move_vertices {
                     self.calc_edge_quadric(corner);
                 }
                 self.corner_flags[corner as usize] &= !(Self::MERGE_MASK | Self::ADJ_TRI_MASK);
@@ -841,7 +842,7 @@ impl<'a> FMeshSimplifier<'a> {
         error
     }
 
-    pub fn begin_move_position(&mut self, position: FVector3f) {
+    pub fn begin_move_position(&mut self, position: Vec3f) {
         let hash = hash_position(position);
 
         let mut verts_to_move = Vec::new();
@@ -854,13 +855,13 @@ impl<'a> FMeshSimplifier<'a> {
         }
         for v_idx in verts_to_move {
             self.vert_hash.remove(hash, v_idx);
-            self.moved_verts.push(v_idx);
+            self.moved_vertices.push(v_idx);
         }
 
         let mut corners_to_move = Vec::new();
         let mut corner = self.corner_hash.first(hash);
         while self.corner_hash.is_valid(corner) {
-            if self.get_position(self.indexes[corner as usize]) == position {
+            if self.get_position(self.indices[corner as usize]) == position {
                 corners_to_move.push(corner);
             }
             corner = self.corner_hash.next(corner);
@@ -886,8 +887,8 @@ impl<'a> FMeshSimplifier<'a> {
     }
 
     pub fn end_move_positions(&mut self) {
-        let moved_verts = std::mem::take(&mut self.moved_verts);
-        for v_idx in moved_verts {
+        let moved_vertices = std::mem::take(&mut self.moved_vertices);
+        for v_idx in moved_vertices {
             self.vert_hash
                 .add(hash_position(self.get_position(v_idx)), v_idx);
         }
@@ -895,7 +896,7 @@ impl<'a> FMeshSimplifier<'a> {
         let moved_corners = std::mem::take(&mut self.moved_corners);
         for c in moved_corners {
             self.corner_hash.add(
-                hash_position(self.get_position(self.indexes[c as usize])),
+                hash_position(self.get_position(self.indices[c as usize])),
                 c,
             );
         }
@@ -925,13 +926,13 @@ impl<'a> FMeshSimplifier<'a> {
         index_moved
     }
 
-    pub fn tri_will_invert(&self, tri_index: u32, new_position: FVector3f) -> bool {
+    pub fn tri_will_invert(&self, tri_index: u32, new_position: Vec3f) -> bool {
         let index_moved = self.corner_index_moved(tri_index);
         if index_moved < 3 {
             let corner = tri_index * 3 + index_moved;
-            let p0 = self.get_position(self.indexes[corner as usize]);
-            let p1 = self.get_position(self.indexes[cycle3(corner) as usize]);
-            let p2 = self.get_position(self.indexes[cycle3_offset(corner, 2) as usize]);
+            let p0 = self.get_position(self.indices[corner as usize]);
+            let p1 = self.get_position(self.indices[cycle3(corner) as usize]);
+            let p2 = self.get_position(self.indices[cycle3_offset(corner, 2) as usize]);
 
             let d21 = p2 - p1;
             let d01 = p0 - p1;
@@ -947,11 +948,11 @@ impl<'a> FMeshSimplifier<'a> {
     pub fn remove_tri(&mut self, tri_index: u32) {
         assert!(!self.tri_removed[tri_index as usize]);
         self.tri_removed[tri_index as usize] = true;
-        self.remaining_num_tris -= 1;
+        self.remaining_triangles -= 1;
 
         for k in 0..3 {
             let corner = tri_index * 3 + k;
-            let vert_index = self.indexes[corner as usize];
+            let vert_index = self.indices[corner as usize];
             let hash = hash_position(self.get_position(vert_index));
             self.corner_hash.remove(hash, corner);
             self.edge_quadrics_valid[corner as usize] = false;
@@ -961,24 +962,24 @@ impl<'a> FMeshSimplifier<'a> {
 
     pub fn fix_up_tri(&mut self, tri_index: u32) {
         assert!(!self.tri_removed[tri_index as usize]);
-        let p0 = self.get_position(self.indexes[(tri_index * 3 + 0) as usize]);
-        let p1 = self.get_position(self.indexes[(tri_index * 3 + 1) as usize]);
-        let p2 = self.get_position(self.indexes[(tri_index * 3 + 2) as usize]);
+        let p0 = self.get_position(self.indices[(tri_index * 3 + 0) as usize]);
+        let p1 = self.get_position(self.indices[(tri_index * 3 + 1) as usize]);
+        let p2 = self.get_position(self.indices[(tri_index * 3 + 2) as usize]);
 
-        let mut b_remove_tri =
+        let mut should_remove_triangle =
             (self.corner_flags[(tri_index * 3) as usize] & Self::REMOVE_TRI_MASK) != 0;
-        if !b_remove_tri {
-            b_remove_tri = p0 == p1 || p1 == p2 || p2 == p0;
+        if !should_remove_triangle {
+            should_remove_triangle = p0 == p1 || p1 == p2 || p2 == p0;
         }
 
-        if !b_remove_tri {
+        if !should_remove_triangle {
             for k in 0..3 {
-                self.remove_duplicate_verts(tri_index * 3 + k);
+                self.remove_duplicate_vertices(tri_index * 3 + k);
             }
-            b_remove_tri = self.is_duplicate_tri(tri_index);
+            should_remove_triangle = self.is_duplicate_tri(tri_index);
         }
 
-        if b_remove_tri {
+        if should_remove_triangle {
             self.remove_tri(tri_index);
         } else {
             self.calc_tri_quadric(tri_index);
@@ -986,16 +987,16 @@ impl<'a> FMeshSimplifier<'a> {
     }
 
     pub fn is_duplicate_tri(&self, tri_index: u32) -> bool {
-        let i0 = self.indexes[(tri_index * 3 + 0) as usize];
-        let i1 = self.indexes[(tri_index * 3 + 1) as usize];
-        let i2 = self.indexes[(tri_index * 3 + 2) as usize];
+        let i0 = self.indices[(tri_index * 3 + 0) as usize];
+        let i1 = self.indices[(tri_index * 3 + 1) as usize];
+        let i2 = self.indices[(tri_index * 3 + 2) as usize];
         let hash = hash_position(self.get_position(i0));
         let mut corner = self.corner_hash.first(hash);
         while self.corner_hash.is_valid(corner) {
             if corner != tri_index * 3
-                && i0 == self.indexes[corner as usize]
-                && i1 == self.indexes[cycle3(corner) as usize]
-                && i2 == self.indexes[cycle3_offset(corner, 2) as usize]
+                && i0 == self.indices[corner as usize]
+                && i1 == self.indices[cycle3(corner) as usize]
+                && i2 == self.indices[cycle3_offset(corner, 2) as usize]
             {
                 return true;
             }
@@ -1005,7 +1006,7 @@ impl<'a> FMeshSimplifier<'a> {
     }
 
     pub fn set_vert_index(&mut self, corner: u32, new_vert_index: u32) {
-        let vert_index = self.indexes[corner as usize];
+        let vert_index = self.indices[corner as usize];
         if vert_index == new_vert_index {
             return;
         }
@@ -1014,21 +1015,21 @@ impl<'a> FMeshSimplifier<'a> {
         if self.vert_ref_count[vert_index as usize] == 0 {
             self.vert_hash
                 .remove(hash_position(self.get_position(vert_index)), vert_index);
-            self.remaining_num_verts -= 1;
+            self.remaining_vertices -= 1;
         }
 
-        self.indexes[corner as usize] = new_vert_index;
+        self.indices[corner as usize] = new_vert_index;
         if new_vert_index != u32::MAX {
             self.vert_ref_count[new_vert_index as usize] += 1;
         }
     }
 
-    pub fn remove_duplicate_verts(&mut self, corner: u32) {
-        let vert_index = self.indexes[corner as usize];
+    pub fn remove_duplicate_vertices(&mut self, corner: u32) {
+        let vert_index = self.indices[corner as usize];
         let num_floats = 3 + self.num_attributes;
         let mut vert_data = vec![0.0f32; num_floats as usize];
         vert_data.copy_from_slice(
-            &self.verts
+            &self.vertices
                 [(num_floats * vert_index) as usize..(num_floats * (vert_index + 1)) as usize],
         );
 
@@ -1038,7 +1039,7 @@ impl<'a> FMeshSimplifier<'a> {
             if vert_index == other_vert_index {
                 break;
             }
-            let other_vert_data = &self.verts[(num_floats * other_vert_index) as usize
+            let other_vert_data = &self.vertices[(num_floats * other_vert_index) as usize
                 ..(num_floats * (other_vert_index + 1)) as usize];
             if vert_data == other_vert_data {
                 self.set_vert_index(corner, other_vert_index);
@@ -1050,16 +1051,16 @@ impl<'a> FMeshSimplifier<'a> {
 
     pub fn simplify(
         &mut self,
-        target_num_verts: u32,
-        target_num_tris: u32,
+        target_vertices: u32,
+        target_triangles: u32,
         target_error: f32,
-        limit_num_verts: u32,
-        limit_num_tris: u32,
+        min_vertices: u32,
+        min_triangles: u32,
         limit_error: f32,
     ) -> f32 {
         log_internal(&format!(
-            "Starting simplify loop: target_tris={}",
-            target_num_tris
+            "Starting simplify loop: target_triangles={}",
+            target_triangles
         ));
         for i in 0..self.num_attributes {
             if self.attribute_weights[i as usize] == 0.0 {
@@ -1068,10 +1069,10 @@ impl<'a> FMeshSimplifier<'a> {
             }
         }
 
-        for tri_index in 0..self.num_tris {
+        for tri_index in 0..self.triangle_count {
             self.fix_up_tri(tri_index);
         }
-        for i in 0..self.num_indexes {
+        for i in 0..self.index_count {
             self.calc_edge_quadric(i);
         }
 
@@ -1098,20 +1099,20 @@ impl<'a> FMeshSimplifier<'a> {
 
             if collapse_count % 1000 == 0 {
                 log_internal(&format!(
-                    "Progress: {} tris remaining, max error: {}",
-                    self.remaining_num_tris, max_error
+                    "Progress: {} triangles remaining, max error: {}",
+                    self.remaining_triangles, max_error
                 ));
             }
 
-            if self.remaining_num_verts <= target_num_verts
-                && self.remaining_num_tris <= target_num_tris
+            if self.remaining_vertices <= target_vertices
+                && self.remaining_triangles <= target_triangles
                 && max_error >= target_error
             {
                 log_internal("Target reached.");
                 break;
             }
-            if self.remaining_num_verts <= limit_num_verts
-                || self.remaining_num_tris <= limit_num_tris
+            if self.remaining_vertices <= min_vertices
+                || self.remaining_triangles <= min_triangles
                 || max_error >= limit_error
             {
                 log_internal("Limit reached.");
@@ -1127,27 +1128,27 @@ impl<'a> FMeshSimplifier<'a> {
         }
 
         let mut tri_index = 0;
-        while self.remaining_num_verts > target_num_verts
-            || self.remaining_num_tris > target_num_tris
+        while self.remaining_vertices > target_vertices
+            || self.remaining_triangles > target_triangles
         {
-            if self.remaining_num_verts <= limit_num_verts
-                || self.remaining_num_tris <= limit_num_tris
+            if self.remaining_vertices <= min_vertices
+                || self.remaining_triangles <= min_triangles
                 || max_error >= limit_error
             {
                 break;
             }
-            while tri_index < self.num_tris && self.tri_removed[tri_index as usize] {
+            while tri_index < self.triangle_count && self.tri_removed[tri_index as usize] {
                 tri_index += 1;
             }
-            if tri_index >= self.num_tris {
+            if tri_index >= self.triangle_count {
                 break;
             }
             self.remove_tri(tri_index);
         }
 
         log_internal(&format!(
-            "Finished simplify loop. Collapses: {}, Final tris: {}",
-            collapse_count, self.remaining_num_tris
+            "Finished simplify loop. Collapses: {}, Final triangles: {}",
+            collapse_count, self.remaining_triangles
         ));
         max_error
     }
@@ -1155,15 +1156,15 @@ impl<'a> FMeshSimplifier<'a> {
     pub fn compact(&mut self) {
         let mut output_vert_index = 0u32;
         let num_floats = 3 + self.num_attributes;
-        let mut new_vert_indices = vec![0u32; self.num_verts as usize];
+        let mut new_vert_indices = vec![0u32; self.vertex_count as usize];
 
-        for vert_index in 0..self.num_verts {
+        for vert_index in 0..self.vertex_count {
             if self.vert_ref_count[vert_index as usize] > 0 {
                 if vert_index != output_vert_index {
                     let src_start = (num_floats * vert_index) as usize;
                     let dst_start = (num_floats * output_vert_index) as usize;
                     for i in 0..num_floats as usize {
-                        self.verts[dst_start + i] = self.verts[src_start + i];
+                        self.vertices[dst_start + i] = self.vertices[src_start + i];
                     }
                 }
                 new_vert_indices[vert_index as usize] = output_vert_index;
@@ -1172,15 +1173,15 @@ impl<'a> FMeshSimplifier<'a> {
         }
 
         let mut output_tri_index = 0u32;
-        for tri_index in 0..self.num_tris {
+        for tri_index in 0..self.triangle_count {
             if !self.tri_removed[tri_index as usize] {
                 for k in 0..3 {
-                    let vert_index = self.indexes[(tri_index * 3 + k) as usize];
-                    self.indexes[(output_tri_index * 3 + k) as usize] =
+                    let vert_index = self.indices[(tri_index * 3 + k) as usize];
+                    self.indices[(output_tri_index * 3 + k) as usize] =
                         new_vert_indices[vert_index as usize];
                 }
-                self.material_indexes[output_tri_index as usize] =
-                    self.material_indexes[tri_index as usize];
+                self.material_ids[output_tri_index as usize] =
+                    self.material_ids[tri_index as usize];
                 output_tri_index += 1;
             }
         }
@@ -1205,14 +1206,14 @@ impl<'a> FMeshSimplifier<'a> {
         let center_id_mask = 0x7fffffffu32;
 
         let mut island_centers: Vec<[f32; 4]> = Vec::new();
-        let mut vert_to_center = vec![no_center_id; self.num_verts as usize];
-        let mut tri_visited = vec![false; self.num_tris as usize];
+        let mut vert_to_center = vec![no_center_id; self.vertex_count as usize];
+        let mut tri_visited = vec![false; self.triangle_count as usize];
         let mut pending_tris = Vec::new();
 
-        for tri_index in 0..self.num_tris {
+        for tri_index in 0..self.triangle_count {
             if tri_visited[tri_index as usize]
                 || self.tri_removed[tri_index as usize]
-                || (self.material_indexes[tri_index as usize] & 0xffffff) != shrink_material_index
+                || (self.material_ids[tri_index as usize] & 0xffffff) != shrink_material_index
             {
                 continue;
             }
@@ -1227,8 +1228,8 @@ impl<'a> FMeshSimplifier<'a> {
             while let Some(cur_tri_index) = pending_tris.pop() {
                 for corner_index in 0..3 {
                     let edge_index = cur_tri_index * 3 + corner_index;
-                    let vert_index0 = self.indexes[edge_index as usize];
-                    let vert_index1 = self.indexes[cycle3(edge_index) as usize];
+                    let vert_index0 = self.indices[edge_index as usize];
+                    let vert_index1 = self.indices[cycle3(edge_index) as usize];
                     let pos0 = self.get_position(vert_index0);
                     let pos1 = self.get_position(vert_index1);
 
@@ -1250,15 +1251,15 @@ impl<'a> FMeshSimplifier<'a> {
                     let hash = hash_position(pos1);
                     let mut corner = self.corner_hash.first(hash);
                     while self.corner_hash.is_valid(corner) {
-                        let other_v0 = self.indexes[corner as usize];
-                        let other_v1 = self.indexes[cycle3(corner) as usize];
+                        let other_v0 = self.indices[corner as usize];
+                        let other_v1 = self.indices[cycle3(corner) as usize];
                         if pos0 == self.get_position(other_v1)
                             && pos1 == self.get_position(other_v0)
                         {
                             let other_tri = corner / 3;
                             if !tri_visited[other_tri as usize]
                                 && !self.tri_removed[other_tri as usize]
-                                && (self.material_indexes[other_tri as usize] & 0xffffff)
+                                && (self.material_ids[other_tri as usize] & 0xffffff)
                                     == shrink_material_index
                             {
                                 pending_tris.push(other_tri);
@@ -1279,7 +1280,7 @@ impl<'a> FMeshSimplifier<'a> {
             }
         }
 
-        for vert_index in 0..self.num_verts {
+        for vert_index in 0..self.vertex_count {
             let cid_raw = vert_to_center[vert_index as usize];
             if cid_raw != no_center_id && (cid_raw & vertex_locked_mask) == 0 && cid_raw != u32::MAX
             {
@@ -1293,17 +1294,17 @@ impl<'a> FMeshSimplifier<'a> {
     }
 
     pub fn shrink_voxel_triangles(&mut self, shrink_amount: f32, voxel_triangles: &[bool]) {
-        for tri_index in 0..self.num_tris {
+        for tri_index in 0..self.triangle_count {
             if !voxel_triangles[tri_index as usize] || self.tri_removed[tri_index as usize] {
                 continue;
             }
-            let mut center = FVector3f::default();
+            let mut center = Vec3f::default();
             for k in 0..3 {
-                center = center + self.get_position(self.indexes[(tri_index * 3 + k) as usize]);
+                center = center + self.get_position(self.indices[(tri_index * 3 + k) as usize]);
             }
             center = center * (1.0 / 3.0);
             for k in 0..3 {
-                let vert_index = self.indexes[(tri_index * 3 + k) as usize];
+                let vert_index = self.indices[(tri_index * 3 + k) as usize];
                 let pos = self.get_position_mut(vert_index);
                 pos.x += (center.x - pos.x) * shrink_amount;
                 pos.y += (center.y - pos.y) * shrink_amount;
@@ -1325,17 +1326,17 @@ impl<'a> FMeshSimplifier<'a> {
             return;
         }
 
-        let mut edge_normals = vec![[0.0f32; 4]; self.num_verts as usize];
+        let mut edge_normals = vec![[0.0f32; 4]; self.vertex_count as usize];
         let mut perimeter = 0.0f32;
         let mut this_area = 0.0f32;
         let mut num_edges = 0u32;
 
-        for tri_index in 0..self.num_tris {
+        for tri_index in 0..self.triangle_count {
             if self.tri_removed[tri_index as usize] {
                 continue;
             }
             let surface_area = self.tri_quadrics[tri_index as usize].base.a as f32;
-            if (self.material_indexes[tri_index as usize] & 0xffffff) != dilate_material_index {
+            if (self.material_ids[tri_index as usize] & 0xffffff) != dilate_material_index {
                 continue;
             }
             this_area += surface_area;
@@ -1343,16 +1344,16 @@ impl<'a> FMeshSimplifier<'a> {
             for corner_index in 0..3 {
                 let edge_index = tri_index * 3 + corner_index;
                 if self.edge_quadrics_valid[edge_index as usize] {
-                    let v0 = self.indexes[edge_index as usize];
-                    let v1 = self.indexes[cycle3(edge_index) as usize];
+                    let v0 = self.indices[edge_index as usize];
+                    let v1 = self.indices[cycle3(edge_index) as usize];
                     let pos0 = self.get_position(v0);
                     let pos1 = self.get_position(v1);
 
                     let mut found_matching = false;
                     let mut corner = self.corner_hash.first(hash_position(pos1));
                     while self.corner_hash.is_valid(corner) {
-                        if pos0 == self.get_position(self.indexes[cycle3(corner) as usize])
-                            && pos1 == self.get_position(self.indexes[corner as usize])
+                        if pos0 == self.get_position(self.indices[cycle3(corner) as usize])
+                            && pos1 == self.get_position(self.indices[corner as usize])
                         {
                             found_matching = true;
                             break;
@@ -1362,9 +1363,9 @@ impl<'a> FMeshSimplifier<'a> {
 
                     if !found_matching {
                         num_edges += 1;
-                        let p0 = self.get_position(self.indexes[(tri_index * 3) as usize]);
-                        let p1 = self.get_position(self.indexes[(tri_index * 3 + 1) as usize]);
-                        let p2 = self.get_position(self.indexes[(tri_index * 3 + 2) as usize]);
+                        let p0 = self.get_position(self.indices[(tri_index * 3) as usize]);
+                        let p1 = self.get_position(self.indices[(tri_index * 3 + 1) as usize]);
+                        let p2 = self.get_position(self.indices[(tri_index * 3 + 2) as usize]);
                         let edge = pos1 - pos0;
                         let face_normal = (p2 - p0).cross(p1 - p0);
                         let mut edge_normal = face_normal.cross(edge);
@@ -1375,10 +1376,7 @@ impl<'a> FMeshSimplifier<'a> {
                             edge_normal = edge_normal * edge_len;
 
                             let mut add_norm =
-                                |simplifier: &FMeshSimplifier,
-                                 v_idx: u32,
-                                 en: FVector3f,
-                                 el: f32| {
+                                |simplifier: &MeshSimplifier, v_idx: u32, en: Vec3f, el: f32| {
                                     let hash = hash_position(simplifier.get_position(v_idx));
                                     let mut cur_v = simplifier.vert_hash.first(hash);
                                     while simplifier.vert_hash.is_valid(cur_v) {
@@ -1425,13 +1423,13 @@ impl<'a> FMeshSimplifier<'a> {
         let dilate_dist = -dilate_surface_area / perimeter;
 
         let mut seed = num_edges;
-        for vert_index in 0..self.num_verts {
+        for vert_index in 0..self.vertex_count {
             let en = edge_normals[vert_index as usize];
             if en[3] > 1e-6 {
                 seed = seed.wrapping_mul(1103515245).wrapping_add(12345);
                 let rand_val = (seed & 0x7fffffff) as f32 / 0x7fffffff as f32;
                 let scale = rand_val * 0.5 + 0.75;
-                let norm = FVector3f::new(en[0] / en[3], en[1] / en[3], en[2] / en[3]);
+                let norm = Vec3f::new(en[0] / en[3], en[1] / en[3], en[2] / en[3]);
                 let len_sq = norm.length_sq();
                 if len_sq > 0.1 {
                     let move_vec = norm * (scale * dilate_dist / len_sq);
