@@ -9,7 +9,13 @@ line_length = 100
 tab_width = 4
 
 [export]
-include = ["SimplifySettings", "LogCallback"]
+include = [
+    "LogCallback",
+    "SimplifySettings",
+    "QemMeshView",
+    "QemSimplifyOptions",
+    "QemSimplifyResult",
+]
 
 [fn]
 rename_args = "snake_case"

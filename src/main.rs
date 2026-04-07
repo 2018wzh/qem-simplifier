@@ -1,5 +1,14 @@
 use clap::Parser;
-use qem_simplifier::{simplify_mesh, SimplifySettings, register_log_callback};
+use qem_simplifier::{
+    qem_context_create,
+    qem_context_destroy,
+    qem_simplify,
+    register_log_callback,
+    QemMeshView,
+    QemSimplifyOptions,
+    QemSimplifyResult,
+    QEM_STATUS_SUCCESS,
+};
 use std::path::Path;
 use std::fs::File;
 use std::io::{BufWriter, Write};
@@ -59,9 +68,9 @@ struct Args {
 }
 
 impl Args {
-    fn to_simplify_settings(&self, original_tris: u32) -> SimplifySettings {
+    fn to_simplify_options(&self, original_tris: u32) -> QemSimplifyOptions {
         let target_tris = self.target_tris.unwrap_or(((original_tris as f32) * self.ratio) as u32);
-        SimplifySettings {
+        QemSimplifyOptions {
             target_num_verts: self.target_verts.unwrap_or(0),
             target_num_tris: target_tris,
             target_error: self.target_error,
@@ -70,9 +79,47 @@ impl Args {
             limit_error: self.limit_error,
             edge_weight: self.edge_weight,
             max_edge_length_factor: self.max_edge_length_factor,
-            preserve_surface_area: self.preserve,
+            preserve_surface_area: if self.preserve { 1 } else { 0 },
         }
     }
+}
+
+fn simplify_with_v2(
+    verts: &mut Vec<f32>,
+    indexes: &mut Vec<u32>,
+    materials: &mut Vec<i32>,
+    settings: QemSimplifyOptions,
+) {
+    let context = qem_context_create();
+    if context.is_null() {
+        panic!("Failed to create qem context");
+    }
+
+    let mut mesh = QemMeshView {
+        verts: verts.as_mut_ptr(),
+        num_verts: (verts.len() / 3) as u32,
+        indexes: indexes.as_mut_ptr(),
+        num_indexes: indexes.len() as u32,
+        material_indexes: materials.as_mut_ptr(),
+        num_attributes: 0,
+        attribute_weights: std::ptr::null(),
+    };
+
+    let mut result = QemSimplifyResult::default();
+    let status = unsafe { qem_simplify(context, &mut mesh, &settings, &mut result) };
+
+    unsafe { qem_context_destroy(context) };
+
+    if status != QEM_STATUS_SUCCESS || result.status != QEM_STATUS_SUCCESS {
+        panic!(
+            "qem_simplify failed. status={}, result_status={}",
+            status, result.status
+        );
+    }
+
+    verts.truncate(result.num_verts as usize * 3);
+    indexes.truncate(result.num_indexes as usize);
+    materials.truncate(result.num_tris as usize);
 }
 
 unsafe extern "C" fn cli_log_callback(msg: *const c_char) {
@@ -133,23 +180,11 @@ fn handle_glb(args: &Args) {
             };
             let mut materials = vec![0i32; indexes.len() / 3];
 
-            let settings = args.to_simplify_settings(indexes.len() as u32 / 3);
+            let settings = args.to_simplify_options(indexes.len() as u32 / 3);
 
             println!("Simplifying GLB Primitive: {} -> {} triangles", indexes.len() / 3, settings.target_num_tris);
 
-            let attribute_weights = vec![];
-            unsafe {
-                simplify_mesh(
-                    verts.as_mut_ptr(),
-                    (verts.len() / 3) as u32,
-                    indexes.as_mut_ptr(),
-                    indexes.len() as u32,
-                    materials.as_mut_ptr(),
-                    0,
-                    attribute_weights.as_ptr(),
-                    settings,
-                );
-            }
+            simplify_with_v2(&mut verts, &mut indexes, &mut materials, settings);
 
             let out_path = Path::new(&args.output);
             save_obj(out_path, &verts, &indexes);
@@ -170,23 +205,11 @@ fn main() {
 
     if ext.to_lowercase() == "obj" {
         let (mut verts, mut indexes, mut materials) = load_obj(input_path);
-        let settings = args.to_simplify_settings(indexes.len() as u32 / 3);
+        let settings = args.to_simplify_options(indexes.len() as u32 / 3);
 
         println!("Simplifying OBJ: {} -> {} triangles", indexes.len() / 3, settings.target_num_tris);
 
-        let attribute_weights = vec![];
-        unsafe {
-            simplify_mesh(
-                verts.as_mut_ptr(),
-                (verts.len() / 3) as u32,
-                indexes.as_mut_ptr(),
-                indexes.len() as u32,
-                materials.as_mut_ptr(),
-                0,
-                attribute_weights.as_ptr(),
-                settings,
-            );
-        }
+        simplify_with_v2(&mut verts, &mut indexes, &mut materials, settings);
         
         save_obj(Path::new(&args.output), &verts, &indexes);
         println!("Saved simplified OBJ to {}", args.output);
