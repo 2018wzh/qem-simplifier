@@ -1,4 +1,3 @@
-
 fn update(a: &mut [f64], s: f64, tau: f64, d1: usize, d2: usize) {
     let nu1 = a[d1];
     let nu2 = a[d2];

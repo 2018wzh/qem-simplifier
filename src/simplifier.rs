@@ -1260,7 +1260,7 @@ impl<'a> MeshSimplifier<'a> {
                             if !tri_visited[other_tri as usize]
                                 && !self.tri_removed[other_tri as usize]
                                 && (self.material_ids[other_tri as usize] & 0xffffff)
-                                    == shrink_material_index
+                                == shrink_material_index
                             {
                                 pending_tris.push(other_tri);
                                 tri_visited[other_tri as usize] = true;

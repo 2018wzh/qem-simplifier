@@ -1,6 +1,6 @@
-use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 use crate::math::lup::*;
 use crate::math::*;
+use std::ops::{Add, AddAssign, Div, DivAssign, Mul, MulAssign, Neg, Sub, SubAssign};
 
 #[derive(Clone, Copy, Debug, Default, PartialEq)]
 pub struct Vec3f {
@@ -391,7 +391,7 @@ impl QuadricAttr {
     pub fn new(
         p0: QVec3, p1: QVec3, p2: QVec3,
         attr0: &[f32], attr1: &[f32], attr2: &[f32],
-        attribute_weights: &[f32], num_attributes: usize
+        attribute_weights: &[f32], num_attributes: usize,
     ) -> Self {
         let mut qa = Self::default();
         let p01 = p1 - p0;
