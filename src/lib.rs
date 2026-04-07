@@ -4,8 +4,8 @@ pub mod simplifier;
 pub mod util;
 
 use simplifier::MeshSimplifier;
-use std::ffi::c_void;
 use std::ffi::CString;
+use std::ffi::c_void;
 use std::os::raw::c_char;
 use std::slice;
 use std::sync::Mutex;
@@ -197,23 +197,23 @@ fn run_simplify_internal(
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn register_log_callback(callback: LogCallback) {
     let mut lock = LOG_CALLBACK.lock().unwrap();
     *lock = Some(callback);
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qem_get_abi_version() -> u32 {
     3
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn qem_context_create() -> *mut c_void {
     Box::into_raw(Box::new(QemContextState::default())) as *mut c_void
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn qem_context_destroy(context: *mut c_void) {
     if !context.is_null() {
         unsafe {
@@ -222,7 +222,7 @@ pub unsafe extern "C" fn qem_context_destroy(context: *mut c_void) {
     }
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn qem_get_last_result(
     context: *const c_void,
     out_result: *mut QemSimplifyResult,
@@ -237,7 +237,7 @@ pub unsafe extern "C" fn qem_get_last_result(
     QEM_STATUS_SUCCESS
 }
 
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn qem_simplify(
     context: *mut c_void,
     mesh: *mut QemMeshView,
