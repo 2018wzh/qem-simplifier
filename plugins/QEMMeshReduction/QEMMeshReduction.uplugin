@@ -1,0 +1,24 @@
+{
+	"FileVersion": 3,
+	"Version": 1,
+	"VersionName": "1.0",
+	"FriendlyName": "QEM Mesh Reduction",
+	"Description": "Mesh simplification using QEMLib",
+	"Category": "Editor",
+	"CreatedBy": "2018wzh",
+	"CreatedByURL": "",
+	"DocsURL": "",
+	"MarketplaceURL": "",
+	"SupportURL": "",
+	"CanContainContent": false,
+	"IsBetaVersion": false,
+	"IsExperimentalVersion": true,
+	"Installed": false,
+	"Modules": [
+		{
+			"Name": "QEMMeshReduction",
+			"Type": "Editor",
+			"LoadingPhase": "PreDefault"
+		}
+	]
+}
