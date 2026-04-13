@@ -138,8 +138,11 @@ fn run_simplify_internal(
         let indices_slice = slice::from_raw_parts_mut(indices, num_indices as usize);
         let material_ids_slice =
             slice::from_raw_parts_mut(material_ids, (num_indices / 3) as usize);
-        let attribute_weights_slice =
-            slice::from_raw_parts(attribute_weights, num_attributes as usize);
+        let attribute_weights_slice = if num_attributes == 0 {
+            &[]
+        } else {
+            slice::from_raw_parts(attribute_weights, num_attributes as usize)
+        };
 
         log_internal(&format!(
             "Starting mesh simplification: target_triangles={}",
