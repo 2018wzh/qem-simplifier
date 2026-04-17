@@ -1,0 +1,7 @@
+Binaries
+Intermediate
+*.dll
+*.dylib
+*.lib
+*.so
+*.exp

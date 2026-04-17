@@ -11,9 +11,25 @@ tab_width = 4
 [export]
 include = [
     "LogCallback",
+    "ProgressCallback",
+    "QemProgressEvent",
     "QemMeshView",
     "QemSimplifyOptions",
     "QemSimplifyResult",
+    "QemSceneMeshView",
+    "QemSceneMeshFeature",
+    "QemSceneNodeView",
+    "QemSceneView",
+    "QemSceneGraphNodeView",
+    "QemSceneGraphMeshBindingView",
+    "QemSceneGraphView",
+    "QemScenePolicy",
+    "QemSceneExecutionOptions",
+    "QemSceneMeshDecision",
+    "QemSceneMeshResult",
+    "QemSceneSimplifyResult",
+    "QemSceneMeshStatistics",
+    "QemSceneStatisticsSummary",
 ]
 
 [fn]

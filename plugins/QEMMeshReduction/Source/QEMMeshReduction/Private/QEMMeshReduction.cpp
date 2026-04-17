@@ -22,7 +22,7 @@ IMPLEMENT_MODULE(FQEMMeshReductionModule, QEMMeshReduction);
 
 namespace
 {
-    constexpr uint32 QemExpectedAbiVersion = 3;
+    constexpr uint32 QemExpectedAbiVersion = 6;
 
     void* GQemRuntimeDllHandle = nullptr;
     bool bQemApiReady = false;
@@ -117,7 +117,7 @@ namespace
 
         virtual const FString& GetVersionString() const override
         {
-            static FString Version = TEXT("QEMMeshReduction_SimplifyMesh_ABIv3");
+            static FString Version = TEXT("QEMMeshReduction_SimplifyMesh_ABIv6");
             return Version;
         }
 
@@ -145,7 +145,7 @@ namespace
             if (!bLoggedFirstReduceCall)
             {
                 const uint32 AbiVersion = qem_get_abi_version();
-                UE_LOG(LogQEMMeshReduction, Log, TEXT("First ReduceMeshDescription call. ABI mode=v3, ABI version=%u"), AbiVersion);
+                UE_LOG(LogQEMMeshReduction, Log, TEXT("First ReduceMeshDescription call. ABI mode=v6, ABI version=%u"), AbiVersion);
                 bLoggedFirstReduceCall = true;
             }
 
@@ -599,7 +599,7 @@ void FQEMMeshReductionModule::StartupModule()
     }
 
     GQemAbiContext = qem_context_create();
-    UE_LOG(LogQEMMeshReduction, Log, TEXT("Startup complete. DLL=%s, ABI mode=v3, ABI version=%u, context=%p"), *LoadedDllPath, AbiVersion, GQemAbiContext);
+    UE_LOG(LogQEMMeshReduction, Log, TEXT("Startup complete. DLL=%s, ABI mode=v6, ABI version=%u, context=%p"), *LoadedDllPath, AbiVersion, GQemAbiContext);
     if (GQemAbiContext == nullptr)
     {
         UE_LOG(LogQEMMeshReduction, Warning, TEXT("Failed to create ABI v3 context at startup; will fallback per-call if needed."));

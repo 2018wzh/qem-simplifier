@@ -1,0 +1,20 @@
+{
+  "FileVersion": 3,
+  "Version": 1,
+  "VersionName": "1.0",
+  "FriendlyName": "QEM Level Scene Simplifier",
+  "Description": "Simplify current UE5 level as a scene via qem_simplifier.dll, with editor UI and progress display.",
+  "Category": "Editor",
+  "CreatedBy": "2018wzh",
+  "CanContainContent": false,
+  "IsBetaVersion": true,
+  "IsExperimentalVersion": true,
+  "Installed": false,
+  "Modules": [
+    {
+      "Name": "QEMLevelSceneSimplifier",
+      "Type": "Editor",
+      "LoadingPhase": "Default"
+    }
+  ]
+}

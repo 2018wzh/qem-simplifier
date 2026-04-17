@@ -20,6 +20,11 @@ tobj = "4.0"
 gltf = "1.4"
 glam = "0.29"
 byteorder = "1.5"
+rayon = "1.10"
+ufbx = "0.10.1"
+gltf-json = "1.4.1"
+bytemuck = "1.25.0"
+indicatif = "0.17"
 
 [build-dependencies]
 cbindgen = "0.26"
