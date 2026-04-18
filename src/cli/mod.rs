@@ -1,13 +1,50 @@
-use crate::QemSimplifyOptions;
+use crate::{register_log_callback, QemSimplifyOptions};
 use clap::{Parser, Subcommand};
+use std::ffi::CStr;
+use std::os::raw::c_char;
 
 pub mod model;
 pub mod progress;
 pub mod scene;
 
+#[cfg(windows)]
+fn init_unicode_console() {
+    use windows_sys::Win32::System::Console::{SetConsoleCP, SetConsoleOutputCP};
+
+    const UTF8_CODE_PAGE: u32 = 65001;
+    unsafe {
+        let _ = SetConsoleOutputCP(UTF8_CODE_PAGE);
+        let _ = SetConsoleCP(UTF8_CODE_PAGE);
+    }
+}
+
+#[cfg(not(windows))]
+fn init_unicode_console() {}
+
+unsafe extern "C" fn cli_log_callback(message: *const c_char) {
+    if message.is_null() {
+        return;
+    }
+
+    let text = unsafe { CStr::from_ptr(message) }.to_string_lossy();
+    eprintln!("[qem] {}", text);
+}
+
+fn init_cli_logging(enabled: bool) {
+    if enabled {
+        unsafe {
+            register_log_callback(cli_log_callback);
+        }
+    }
+}
+
 #[derive(Parser, Debug)]
 #[command(author, version, about = "QEM Mesh Simplifier CLI", long_about = None)]
 pub struct Cli {
+    /// Enable verbose output (internal logs and diagnostics)
+    #[arg(short = 'v', long, global = true, default_value_t = false)]
+    pub verbose: bool,
+
     #[command(subcommand)]
     pub command: Commands,
 }
@@ -119,19 +156,26 @@ pub struct SceneArgs {
     /// Use world scale for importance weighting.
     #[arg(long, default_value_t = true)]
     pub use_world_scale: bool,
+
+    /// Only compute and preview scene simplification decisions without applying simplification.
+    #[arg(long, default_value_t = false)]
+    pub dry_run: bool,
 }
 
 pub fn run() {
+    init_unicode_console();
+
     let cli = Cli::parse();
+    init_cli_logging(cli.verbose);
 
     match cli.command {
         Commands::Model(args) => {
-            if let Err(e) = model::handle_model(&args) {
+            if let Err(e) = model::handle_model(&args, cli.verbose) {
                 eprintln!("Error simplifying model: {}", e);
             }
         }
         Commands::Scene(args) => {
-            if let Err(e) = scene::handle_scene(&args) {
+            if let Err(e) = scene::handle_scene(&args, cli.verbose) {
                 eprintln!("Error simplifying scene: {}", e);
             }
         }

@@ -23,8 +23,12 @@ fn main() {
         .expect("Unable to generate bindings")
         .write_to_file(&output_file);
 
-    let plugin_root = crate_dir_path.join("plugins").join("QEMMeshReduction");
-    if plugin_root.exists() {
+    for plugin_name in ["QEMMeshReduction", "QEMLevelSceneSimplifier"] {
+        let plugin_root = crate_dir_path.join("plugins").join(plugin_name);
+        if !plugin_root.exists() {
+            continue;
+        }
+
         let plugin_header = plugin_root
             .join("Source")
             .join("ThirdParty")

@@ -25,6 +25,11 @@ ufbx = "0.10.1"
 gltf-json = "1.4.1"
 bytemuck = "1.25.0"
 indicatif = "0.17"
+console = "0.15"
+supports-unicode = "3.0"
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.59", features = ["Win32_System_Console"] }
 
 [build-dependencies]
 cbindgen = "0.26"

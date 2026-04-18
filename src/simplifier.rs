@@ -1057,6 +1057,13 @@ impl<'a> MeshSimplifier<'a> {
         min_triangles: u32,
         limit_error: f32,
     ) -> f32 {
+        let target_vertices_enabled = target_vertices > 0;
+        let target_triangles_enabled = target_triangles > 0;
+        let target_error_enabled = target_error.is_finite() && target_error > 0.0;
+        let limit_error_enabled = limit_error.is_finite() && limit_error > 0.0;
+        let min_vertices_enabled = min_vertices > 0;
+        let min_triangles_enabled = min_triangles > 0;
+
         log_internal(&format!(
             "Starting simplify loop: target_triangles={}",
             target_triangles
@@ -1086,7 +1093,7 @@ impl<'a> MeshSimplifier<'a> {
         let mut max_error = 0.0f32;
         let mut collapse_count = 0;
         while !self.pair_heap.is_empty() {
-            if self.pair_heap.get_key(self.pair_heap.top()) > limit_error {
+            if limit_error_enabled && self.pair_heap.get_key(self.pair_heap.top()) > limit_error {
                 log_internal("Reached limit error, stopping.");
                 break;
             }
@@ -1103,17 +1110,24 @@ impl<'a> MeshSimplifier<'a> {
                 ));
             }
 
-            if self.remaining_vertices <= target_vertices
-                && self.remaining_triangles <= target_triangles
-                && max_error >= target_error
-            {
+            let reached_target_vertices =
+                !target_vertices_enabled || self.remaining_vertices <= target_vertices;
+            let reached_target_triangles =
+                !target_triangles_enabled || self.remaining_triangles <= target_triangles;
+            let reached_target_error = !target_error_enabled || max_error >= target_error;
+
+            if reached_target_vertices && reached_target_triangles && reached_target_error {
                 log_internal("Target reached.");
                 break;
             }
-            if self.remaining_vertices <= min_vertices
-                || self.remaining_triangles <= min_triangles
-                || max_error >= limit_error
-            {
+
+            let reached_min_vertices =
+                min_vertices_enabled && self.remaining_vertices <= min_vertices;
+            let reached_min_triangles =
+                min_triangles_enabled && self.remaining_triangles <= min_triangles;
+            let reached_limit_error = limit_error_enabled && max_error >= limit_error;
+
+            if reached_min_vertices || reached_min_triangles || reached_limit_error {
                 log_internal("Limit reached.");
                 break;
             }
@@ -1127,13 +1141,16 @@ impl<'a> MeshSimplifier<'a> {
         }
 
         let mut tri_index = 0;
-        while self.remaining_vertices > target_vertices
-            || self.remaining_triangles > target_triangles
+        while (target_vertices_enabled && self.remaining_vertices > target_vertices)
+            || (target_triangles_enabled && self.remaining_triangles > target_triangles)
         {
-            if self.remaining_vertices <= min_vertices
-                || self.remaining_triangles <= min_triangles
-                || max_error >= limit_error
-            {
+            let reached_min_vertices =
+                min_vertices_enabled && self.remaining_vertices <= min_vertices;
+            let reached_min_triangles =
+                min_triangles_enabled && self.remaining_triangles <= min_triangles;
+            let reached_limit_error = limit_error_enabled && max_error >= limit_error;
+
+            if reached_min_vertices || reached_min_triangles || reached_limit_error {
                 break;
             }
             while tri_index < self.triangle_count && self.tri_removed[tri_index as usize] {

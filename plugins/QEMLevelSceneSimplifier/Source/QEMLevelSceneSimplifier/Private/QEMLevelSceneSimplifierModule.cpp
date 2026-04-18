@@ -84,17 +84,17 @@ struct FComputedSimplifyPlan
 
 namespace
 {
-    constexpr uint32 QemExpectedAbiVersion = 6;
+    constexpr uint32 QemExpectedAbiVersion = 7;
 
     using FnQemGetAbiVersion = decltype(&qem_get_abi_version);
-    using FnQemSceneComputeDecisions = decltype(&qem_scene_compute_decisions);
+    using FnQemSceneGraphComputeDecisions = decltype(&qem_scene_graph_compute_decisions);
 
     void* GQemRuntimeDllHandle = nullptr;
     bool bQemApiReady = false;
     FString GLoadedQemDllPath;
 
     FnQemGetAbiVersion GFnQemGetAbiVersion = nullptr;
-    FnQemSceneComputeDecisions GFnQemSceneComputeDecisions = nullptr;
+    FnQemSceneGraphComputeDecisions GFnQemSceneGraphComputeDecisions = nullptr;
 
     FString GetSystemErrorMessage()
     {
@@ -216,7 +216,7 @@ namespace
         }
 
         const bool bLoadedAbiVersion = LoadExport(GQemRuntimeDllHandle, TEXT("qem_get_abi_version"), GFnQemGetAbiVersion);
-        const bool bLoadedSceneDecisions = LoadExport(GQemRuntimeDllHandle, TEXT("qem_scene_compute_decisions"), GFnQemSceneComputeDecisions);
+        const bool bLoadedSceneDecisions = LoadExport(GQemRuntimeDllHandle, TEXT("qem_scene_graph_compute_decisions"), GFnQemSceneGraphComputeDecisions);
         const bool bAllLoaded = bLoadedAbiVersion && bLoadedSceneDecisions;
 
         if (!bLoadedAbiVersion)
@@ -226,7 +226,7 @@ namespace
 
         if (!bLoadedSceneDecisions)
         {
-            UE_LOG(LogQEMLevelSceneSimplifier, Error, TEXT("[DLL] Missing export: qem_scene_compute_decisions (%s)"), *LoadedPath);
+            UE_LOG(LogQEMLevelSceneSimplifier, Error, TEXT("[DLL] Missing export: qem_scene_graph_compute_decisions (%s)"), *LoadedPath);
         }
 
         if (!bAllLoaded)
@@ -238,7 +238,7 @@ namespace
             }
 
             GFnQemGetAbiVersion = nullptr;
-            GFnQemSceneComputeDecisions = nullptr;
+            GFnQemSceneGraphComputeDecisions = nullptr;
 
             UE_LOG(LogQEMLevelSceneSimplifier, Error, TEXT("[DLL] Export check failed. Unloaded: %s"), *LoadedPath);
             OutError = FString::Printf(TEXT("DLL 已加载但导出符号不完整：%s"), *LoadedPath);
@@ -255,7 +255,7 @@ namespace
             }
 
             GFnQemGetAbiVersion = nullptr;
-            GFnQemSceneComputeDecisions = nullptr;
+            GFnQemSceneGraphComputeDecisions = nullptr;
 
             UE_LOG(
                 LogQEMLevelSceneSimplifier,
@@ -819,9 +819,9 @@ namespace
             MinMeshRatio,
             MaxMeshRatio);
 
-        if (!GFnQemSceneComputeDecisions)
+        if (!GFnQemSceneGraphComputeDecisions)
         {
-            OutError = TEXT("DLL 未导出 qem_scene_compute_decisions");
+            OutError = TEXT("DLL 未导出 qem_scene_graph_compute_decisions");
             return false;
         }
 
@@ -840,22 +840,37 @@ namespace
             MeshViews[MeshIndex].mesh.attribute_weights = nullptr;
         }
 
-        TArray<QemSceneNodeView> NodeViews;
+        TArray<QemSceneGraphNodeView> NodeViews;
         NodeViews.SetNum(Capture.Nodes.Num());
+        TArray<QemSceneGraphMeshBindingView> BindingViews;
+        BindingViews.Reserve(Capture.Nodes.Num());
+
         for (int32 NodeIndex = 0; NodeIndex < Capture.Nodes.Num(); ++NodeIndex)
         {
             const FLevelSceneNodeData& Node = Capture.Nodes[NodeIndex];
-            NodeViews[NodeIndex].parent_index = Node.ParentIndex;
-            NodeViews[NodeIndex].mesh_index = Node.MeshIndex;
-            FMemory::Memcpy(NodeViews[NodeIndex].world_matrix, Node.WorldMatrix, sizeof(float) * 16);
+            
+            // The API expects parent-relative local matrices.
+            // We flatten the hierarchy here because FLevelSceneNodeData already stores WorldMatrix.
+            NodeViews[NodeIndex].parent_index = -1;
+            FMemory::Memcpy(NodeViews[NodeIndex].local_matrix, Node.WorldMatrix, sizeof(float) * 16);
+
+            if (Node.MeshIndex >= 0)
+            {
+                QemSceneGraphMeshBindingView Binding{};
+                Binding.node_index = static_cast<uint32>(NodeIndex);
+                Binding.mesh_index = static_cast<uint32>(Node.MeshIndex);
+                Binding.use_mesh_to_node_matrix = 0;
+                BindingViews.Add(Binding);
+            }
         }
 
-        QemSceneView SceneView{};
+        QemSceneGraphView SceneView{};
         SceneView.meshes = MeshViews.GetData();
         SceneView.num_meshes = static_cast<uint32>(MeshViews.Num());
         SceneView.nodes = NodeViews.GetData();
         SceneView.num_nodes = static_cast<uint32>(NodeViews.Num());
-        SceneView.root_node = Capture.RootNode;
+        SceneView.mesh_bindings = BindingViews.GetData();
+        SceneView.num_mesh_bindings = static_cast<uint32>(BindingViews.Num());
 
         QemScenePolicy Policy{};
         Policy.target_triangle_ratio = FMath::Clamp(TargetRatio, 0.01f, 1.0f);
@@ -873,7 +888,7 @@ namespace
 
         OutDecisions.SetNum(MeshViews.Num());
 
-        const int32 Status = GFnQemSceneComputeDecisions(
+        const int32 Status = GFnQemSceneGraphComputeDecisions(
             &SceneView,
             &Policy,
             OutDecisions.GetData(),
@@ -891,7 +906,7 @@ namespace
                 OutSceneResult.status,
                 OutSceneResult.source_triangles,
                 OutSceneResult.target_triangles);
-            OutError = FString::Printf(TEXT("qem_scene_compute_decisions 失败：status=%d, result=%d"), Status, OutSceneResult.status);
+            OutError = FString::Printf(TEXT("qem_scene_graph_compute_decisions 失败：status=%d, result=%d"), Status, OutSceneResult.status);
             return false;
         }
 
@@ -2142,7 +2157,7 @@ void FQEMLevelSceneSimplifierModule::ShutdownModule()
     bQemApiReady = false;
     GLoadedQemDllPath.Empty();
     GFnQemGetAbiVersion = nullptr;
-    GFnQemSceneComputeDecisions = nullptr;
+    GFnQemSceneGraphComputeDecisions = nullptr;
 
     UE_LOG(LogQEMLevelSceneSimplifier, Log, TEXT("[Module] Shutdown complete."));
 }

@@ -1,6 +1,6 @@
 use crate::{
-    qem_context_create, qem_context_destroy, qem_simplify, report_progress_event, QemMeshView,
-    QemProgressEvent, QemSimplifyOptions, QemSimplifyResult, QEM_PROGRESS_SCOPE_SCENE,
+    log_internal, qem_context_create, qem_context_destroy, qem_simplify, report_progress_event,
+    QemMeshView, QemProgressEvent, QemSimplifyOptions, QemSimplifyResult, QEM_PROGRESS_SCOPE_SCENE,
     QEM_PROGRESS_STAGE_BEGIN, QEM_PROGRESS_STAGE_END, QEM_PROGRESS_STAGE_UPDATE,
     QEM_STATUS_INSUFFICIENT_BUFFER, QEM_STATUS_INVALID_ARGUMENT, QEM_STATUS_PANIC,
     QEM_STATUS_SUCCESS,
@@ -26,24 +26,6 @@ pub struct QemSceneMeshView {
 
 unsafe impl Send for QemSceneMeshView {}
 unsafe impl Sync for QemSceneMeshView {}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug, Default)]
-pub struct QemSceneNodeView {
-    pub parent_index: i32,
-    pub mesh_index: i32,
-    pub world_matrix: [f32; 16],
-}
-
-#[repr(C)]
-#[derive(Clone, Copy, Debug)]
-pub struct QemSceneView {
-    pub meshes: *mut QemSceneMeshView,
-    pub num_meshes: u32,
-    pub nodes: *const QemSceneNodeView,
-    pub num_nodes: u32,
-    pub root_node: i32,
-}
 
 #[repr(C)]
 #[derive(Clone, Copy, Debug, Default)]
@@ -518,42 +500,6 @@ fn solve_integer_targets(
     targets
 }
 
-fn gather_scene_slices<'a>(
-    scene: *const QemSceneView,
-) -> Result<(&'a [QemSceneMeshView], &'a [QemSceneNodeView]), i32> {
-    if scene.is_null() {
-        return Err(QEM_STATUS_INVALID_ARGUMENT);
-    }
-
-    let scene_ref = unsafe { &*scene };
-
-    if scene_ref.num_meshes == 0 || scene_ref.meshes.is_null() {
-        return Err(QEM_STATUS_INVALID_ARGUMENT);
-    }
-
-    if scene_ref.num_nodes > 0 && scene_ref.nodes.is_null() {
-        return Err(QEM_STATUS_INVALID_ARGUMENT);
-    }
-
-    if scene_ref.root_node >= scene_ref.num_nodes as i32 {
-        return Err(QEM_STATUS_INVALID_ARGUMENT);
-    }
-
-    let meshes = unsafe {
-        slice::from_raw_parts(
-            scene_ref.meshes as *const QemSceneMeshView,
-            scene_ref.num_meshes as usize,
-        )
-    };
-    let nodes = if scene_ref.num_nodes == 0 {
-        &[][..]
-    } else {
-        unsafe { slice::from_raw_parts(scene_ref.nodes, scene_ref.num_nodes as usize) }
-    };
-
-    Ok((meshes, nodes))
-}
-
 fn gather_scene_graph_slices<'a>(
     graph: *const QemSceneGraphView,
 ) -> Result<
@@ -655,109 +601,6 @@ fn compute_scene_graph_world_scales(nodes: &[QemSceneGraphNodeView]) -> Result<V
     Ok(cache)
 }
 
-fn compute_scene_metrics(
-    meshes: &[QemSceneMeshView],
-    nodes: &[QemSceneNodeView],
-    policy: QemScenePolicy,
-) -> Result<Vec<MeshSceneMetrics>, i32> {
-    let mut instance_count = vec![0u32; meshes.len()];
-    let mut instance_scale_sum = vec![0.0f64; meshes.len()];
-
-    for node in nodes {
-        if node.parent_index >= nodes.len() as i32 && node.parent_index >= 0 {
-            return Err(QEM_STATUS_INVALID_ARGUMENT);
-        }
-
-        if node.mesh_index >= 0 {
-            let mesh_index = node.mesh_index as usize;
-            if mesh_index >= meshes.len() {
-                return Err(QEM_STATUS_INVALID_ARGUMENT);
-            }
-
-            instance_count[mesh_index] += 1;
-            let scale = if policy.use_world_scale != 0 {
-                matrix_abs_det3x3(&node.world_matrix)
-            } else {
-                1.0
-            };
-            instance_scale_sum[mesh_index] += scale;
-        }
-    }
-
-    let mut metrics = Vec::with_capacity(meshes.len());
-
-    let external_weights: Option<&[f32]> = if policy.weight_mode == QEM_SCENE_WEIGHT_EXTERNAL {
-        if policy.external_importance_weights.is_null()
-            || policy.external_importance_count < meshes.len() as u32
-        {
-            return Err(QEM_STATUS_INVALID_ARGUMENT);
-        }
-        Some(unsafe {
-            slice::from_raw_parts(
-                policy.external_importance_weights,
-                policy.external_importance_count as usize,
-            )
-        })
-    } else {
-        None
-    };
-
-    for (mesh_index, scene_mesh) in meshes.iter().enumerate() {
-        let mesh = &scene_mesh.mesh;
-        if mesh.indices.is_null() || mesh.vertices.is_null() || mesh.material_ids.is_null() {
-            return Err(QEM_STATUS_INVALID_ARGUMENT);
-        }
-        if mesh.num_vertices == 0 || mesh.num_indices == 0 || mesh.num_indices % 3 != 0 {
-            return Err(QEM_STATUS_INVALID_ARGUMENT);
-        }
-
-        let source_triangles = mesh.num_indices / 3;
-        let instances = if instance_count[mesh_index] == 0 {
-            1
-        } else {
-            instance_count[mesh_index]
-        };
-        let instance_scale = if instance_scale_sum[mesh_index] <= 0.0 {
-            instances as f64
-        } else {
-            instance_scale_sum[mesh_index]
-        };
-
-        let source_effective_triangles = source_triangles as f64 * instance_scale.max(1.0e-6);
-        let volume = mesh_volume(mesh);
-
-        let weight_exponent = if policy.weight_exponent.is_finite() {
-            policy.weight_exponent.max(0.01) as f64
-        } else {
-            1.0
-        };
-
-        let base_weight = match policy.weight_mode {
-            QEM_SCENE_WEIGHT_UNIFORM => 1.0,
-            QEM_SCENE_WEIGHT_MESH_VOLUME => volume,
-            QEM_SCENE_WEIGHT_MESH_VOLUME_X_INSTANCES => volume * instance_scale.max(1.0),
-            QEM_SCENE_WEIGHT_EXTERNAL => external_weights
-                .and_then(|w| w.get(mesh_index).copied())
-                .unwrap_or(0.0) as f64,
-            _ => return Err(QEM_STATUS_INVALID_ARGUMENT),
-        };
-        let importance_weight = base_weight.max(1.0e-6).powf(weight_exponent);
-
-        metrics.push(MeshSceneMetrics {
-            mesh_index: mesh_index as u32,
-            mesh_id: scene_mesh.mesh_id,
-            source_triangles,
-            source_effective_triangles,
-            instance_count: instances,
-            world_scale_sum: instance_scale,
-            bbox_volume: volume,
-            importance_weight,
-        });
-    }
-
-    Ok(metrics)
-}
-
 fn compute_scene_graph_metrics(
     graph: *const QemSceneGraphView,
     policy: QemScenePolicy,
@@ -778,9 +621,19 @@ fn compute_scene_graph_metrics(
         let mesh_index = binding.mesh_index as usize;
 
         if mesh_index >= meshes.len() {
+            log_internal(&format!(
+                "qem_scene_graph_compute_decisions: invalid binding mesh_index {} (mesh_count={})",
+                binding.mesh_index,
+                meshes.len()
+            ));
             return Err(QEM_STATUS_INVALID_ARGUMENT);
         }
         if node_index >= nodes.len() {
+            log_internal(&format!(
+                "qem_scene_graph_compute_decisions: invalid binding node_index {} (node_count={})",
+                binding.node_index,
+                nodes.len()
+            ));
             return Err(QEM_STATUS_INVALID_ARGUMENT);
         }
 
@@ -803,6 +656,12 @@ fn compute_scene_graph_metrics(
         if policy.external_importance_weights.is_null()
             || policy.external_importance_count < meshes.len() as u32
         {
+            log_internal(&format!(
+                "qem_scene_graph_compute_decisions: invalid external weights. ptr={:p}, count={}, mesh_count={}",
+                policy.external_importance_weights,
+                policy.external_importance_count,
+                meshes.len()
+            ));
             return Err(QEM_STATUS_INVALID_ARGUMENT);
         }
         Some(unsafe {
@@ -819,9 +678,20 @@ fn compute_scene_graph_metrics(
     for (mesh_index, scene_mesh) in meshes.iter().enumerate() {
         let mesh = &scene_mesh.mesh;
         if mesh.indices.is_null() || mesh.vertices.is_null() || mesh.material_ids.is_null() {
+            log_internal(&format!(
+                "qem_scene_graph_compute_decisions: mesh[{}] invalid pointers. vertices={:p}, indices={:p}, material_ids={:p}",
+                mesh_index,
+                mesh.vertices,
+                mesh.indices,
+                mesh.material_ids
+            ));
             return Err(QEM_STATUS_INVALID_ARGUMENT);
         }
         if mesh.num_vertices == 0 || mesh.num_indices == 0 || mesh.num_indices % 3 != 0 {
+            log_internal(&format!(
+                "qem_scene_graph_compute_decisions: mesh[{}] invalid geometry. num_vertices={}, num_indices={}",
+                mesh_index, mesh.num_vertices, mesh.num_indices
+            ));
             return Err(QEM_STATUS_INVALID_ARGUMENT);
         }
 
@@ -853,7 +723,13 @@ fn compute_scene_graph_metrics(
             QEM_SCENE_WEIGHT_EXTERNAL => external_weights
                 .and_then(|w| w.get(mesh_index).copied())
                 .unwrap_or(0.0) as f64,
-            _ => return Err(QEM_STATUS_INVALID_ARGUMENT),
+            _ => {
+                log_internal(&format!(
+                    "qem_scene_graph_compute_decisions: invalid weight_mode {}",
+                    policy.weight_mode
+                ));
+                return Err(QEM_STATUS_INVALID_ARGUMENT);
+            }
         };
         let importance_weight = base_weight.max(1.0e-6).powf(weight_exponent);
 
@@ -877,6 +753,7 @@ fn compute_decisions_from_metrics(
     policy: QemScenePolicy,
 ) -> Result<(Vec<QemSceneMeshDecision>, QemSceneSimplifyResult), i32> {
     if metrics.is_empty() {
+        log_internal("qem_scene_graph_compute_decisions: metrics are empty");
         return Err(QEM_STATUS_INVALID_ARGUMENT);
     }
 
@@ -1030,15 +907,6 @@ mod tests {
         assert_eq!(summary.target_triangles, 1);
         assert!(decisions.iter().all(|d| d.target_triangles <= 1));
     }
-}
-
-fn compute_decisions_internal(
-    scene: *const QemSceneView,
-    policy: QemScenePolicy,
-) -> Result<(Vec<QemSceneMeshDecision>, QemSceneSimplifyResult), i32> {
-    let (meshes, nodes) = gather_scene_slices(scene)?;
-    let metrics = compute_scene_metrics(meshes, nodes, policy)?;
-    compute_decisions_from_metrics(&metrics, policy)
 }
 
 fn compute_decisions_graph_internal(
@@ -1423,107 +1291,6 @@ pub unsafe extern "C" fn qem_scene_export_statistics_csv(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn qem_scene_extract_features(
-    scene: *const QemSceneView,
-    policy: *const QemScenePolicy,
-    out_features: *mut QemSceneMeshFeature,
-    feature_capacity: u32,
-    out_feature_count: *mut u32,
-    out_result: *mut QemSceneSimplifyResult,
-) -> i32 {
-    if scene.is_null() || policy.is_null() || out_feature_count.is_null() || out_result.is_null() {
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    let policy_value = unsafe { *policy };
-    let (meshes, nodes) = match gather_scene_slices(scene) {
-        Ok(v) => v,
-        Err(code) => {
-            unsafe {
-                *out_feature_count = 0;
-                *out_result = QemSceneSimplifyResult {
-                    status: code,
-                    ..QemSceneSimplifyResult::default()
-                };
-            }
-            return code;
-        }
-    };
-
-    let metrics = match compute_scene_metrics(meshes, nodes, policy_value) {
-        Ok(v) => v,
-        Err(code) => {
-            unsafe {
-                *out_feature_count = 0;
-                *out_result = QemSceneSimplifyResult {
-                    status: code,
-                    ..QemSceneSimplifyResult::default()
-                };
-            }
-            return code;
-        }
-    };
-
-    unsafe {
-        *out_feature_count = metrics.len() as u32;
-    }
-
-    if !out_features.is_null() {
-        if feature_capacity < metrics.len() as u32 {
-            unsafe {
-                *out_result = QemSceneSimplifyResult {
-                    status: QEM_STATUS_INSUFFICIENT_BUFFER,
-                    num_meshes: metrics.len() as u32,
-                    num_decisions: 0,
-                    num_simplified_meshes: 0,
-                    source_triangles: metrics.iter().map(|m| m.source_triangles as u64).sum(),
-                    target_triangles: 0,
-                    output_triangles: 0,
-                    source_effective_triangles: 0.0,
-                    target_effective_triangles: 0.0,
-                };
-            }
-            return QEM_STATUS_INSUFFICIENT_BUFFER;
-        }
-
-        let features: Vec<QemSceneMeshFeature> = metrics
-            .iter()
-            .map(|m| QemSceneMeshFeature {
-                mesh_index: m.mesh_index,
-                mesh_id: m.mesh_id,
-                source_triangles: m.source_triangles,
-                instance_count: m.instance_count,
-                world_scale_sum: m.world_scale_sum,
-                bbox_volume: m.bbox_volume,
-                importance_weight: m.importance_weight,
-            })
-            .collect();
-
-        unsafe {
-            ptr::copy_nonoverlapping(features.as_ptr(), out_features, features.len());
-        }
-    } else if feature_capacity != 0 {
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    unsafe {
-        *out_result = QemSceneSimplifyResult {
-            status: QEM_STATUS_SUCCESS,
-            num_meshes: metrics.len() as u32,
-            num_decisions: 0,
-            num_simplified_meshes: 0,
-            source_triangles: metrics.iter().map(|m| m.source_triangles as u64).sum(),
-            target_triangles: 0,
-            output_triangles: 0,
-            source_effective_triangles: 0.0,
-            target_effective_triangles: 0.0,
-        };
-    }
-
-    QEM_STATUS_SUCCESS
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn qem_scene_graph_extract_features(
     graph: *const QemSceneGraphView,
     policy: *const QemScenePolicy,
@@ -1611,66 +1378,6 @@ pub unsafe extern "C" fn qem_scene_graph_extract_features(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn qem_scene_compute_decisions(
-    scene: *const QemSceneView,
-    policy: *const QemScenePolicy,
-    out_decisions: *mut QemSceneMeshDecision,
-    decision_capacity: u32,
-    out_decision_count: *mut u32,
-    out_result: *mut QemSceneSimplifyResult,
-) -> i32 {
-    if scene.is_null() || policy.is_null() || out_decision_count.is_null() || out_result.is_null() {
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    let policy_value = unsafe { *policy };
-
-    let (decisions, mut summary) = match compute_decisions_internal(scene, policy_value) {
-        Ok(value) => value,
-        Err(code) => {
-            unsafe {
-                *out_decision_count = 0;
-                *out_result = QemSceneSimplifyResult {
-                    status: code,
-                    ..QemSceneSimplifyResult::default()
-                };
-            }
-            return code;
-        }
-    };
-
-    unsafe {
-        *out_decision_count = decisions.len() as u32;
-    }
-
-    if !out_decisions.is_null() {
-        if decision_capacity < decisions.len() as u32 {
-            summary.status = QEM_STATUS_INSUFFICIENT_BUFFER;
-            unsafe {
-                *out_result = summary;
-            }
-            return QEM_STATUS_INSUFFICIENT_BUFFER;
-        }
-
-        unsafe {
-            ptr::copy_nonoverlapping(decisions.as_ptr(), out_decisions, decisions.len());
-        }
-    } else if decision_capacity != 0 {
-        summary.status = QEM_STATUS_INVALID_ARGUMENT;
-        unsafe {
-            *out_result = summary;
-        }
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    unsafe {
-        *out_result = summary;
-    }
-
-    QEM_STATUS_SUCCESS
-}
-
-#[no_mangle]
 pub unsafe extern "C" fn qem_scene_graph_compute_decisions(
     graph: *const QemSceneGraphView,
     policy: *const QemScenePolicy,
@@ -1731,9 +1438,9 @@ pub unsafe extern "C" fn qem_scene_graph_compute_decisions(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn qem_scene_apply_decisions(
+pub unsafe extern "C" fn qem_scene_graph_apply_decisions(
     context: *mut c_void,
-    scene: *mut QemSceneView,
+    scene_graph: *mut QemSceneGraphView,
     decisions: *const QemSceneMeshDecision,
     num_decisions: u32,
     base_options: *const QemSimplifyOptions,
@@ -1742,9 +1449,9 @@ pub unsafe extern "C" fn qem_scene_apply_decisions(
     out_result: *mut QemSceneSimplifyResult,
 ) -> i32 {
     unsafe {
-        qem_scene_apply_decisions_ex(
+        qem_scene_graph_apply_decisions_ex(
             context,
-            scene,
+            scene_graph,
             std::ptr::null(),
             decisions,
             num_decisions,
@@ -1758,9 +1465,9 @@ pub unsafe extern "C" fn qem_scene_apply_decisions(
 }
 
 #[no_mangle]
-pub unsafe extern "C" fn qem_scene_apply_decisions_ex(
+pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
     context: *mut c_void,
-    scene: *mut QemSceneView,
+    scene_graph: *mut QemSceneGraphView,
     policy: *const QemScenePolicy,
     decisions: *const QemSceneMeshDecision,
     num_decisions: u32,
@@ -1771,7 +1478,7 @@ pub unsafe extern "C" fn qem_scene_apply_decisions_ex(
     out_result: *mut QemSceneSimplifyResult,
 ) -> i32 {
     if context.is_null()
-        || scene.is_null()
+        || scene_graph.is_null()
         || decisions.is_null()
         || base_options.is_null()
         || out_result.is_null()
@@ -1786,21 +1493,25 @@ pub unsafe extern "C" fn qem_scene_apply_decisions_ex(
     };
     let execution = resolve_execution_options(policy_value, execution_options);
 
-    let scene_ref = unsafe { &mut *scene };
-    if scene_ref.num_meshes == 0 || scene_ref.meshes.is_null() {
+    let graph_ref = unsafe { &mut *scene_graph };
+    if graph_ref.num_meshes == 0 || graph_ref.meshes.is_null() {
         return QEM_STATUS_INVALID_ARGUMENT;
     }
 
     if !out_mesh_results.is_null() {
-        if mesh_result_capacity < scene_ref.num_meshes {
+        if mesh_result_capacity < graph_ref.num_meshes {
             return QEM_STATUS_INSUFFICIENT_BUFFER;
         }
     } else if mesh_result_capacity != 0 {
         return QEM_STATUS_INVALID_ARGUMENT;
     }
 
-    let meshes =
-        unsafe { slice::from_raw_parts_mut(scene_ref.meshes, scene_ref.num_meshes as usize) };
+    let meshes = unsafe {
+        slice::from_raw_parts_mut(
+            graph_ref.meshes as *mut QemSceneMeshView,
+            graph_ref.num_meshes as usize,
+        )
+    };
     let decisions_slice = unsafe { slice::from_raw_parts(decisions, num_decisions as usize) };
 
     let mut decision_by_mesh = vec![None; meshes.len()];
@@ -2015,212 +1726,6 @@ pub unsafe extern "C" fn qem_scene_apply_decisions_ex(
     );
 
     status
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn qem_scene_graph_apply_decisions(
-    context: *mut c_void,
-    scene_graph: *mut QemSceneGraphView,
-    decisions: *const QemSceneMeshDecision,
-    num_decisions: u32,
-    base_options: *const QemSimplifyOptions,
-    out_mesh_results: *mut QemSceneMeshResult,
-    mesh_result_capacity: u32,
-    out_result: *mut QemSceneSimplifyResult,
-) -> i32 {
-    unsafe {
-        qem_scene_graph_apply_decisions_ex(
-            context,
-            scene_graph,
-            std::ptr::null(),
-            decisions,
-            num_decisions,
-            base_options,
-            std::ptr::null(),
-            out_mesh_results,
-            mesh_result_capacity,
-            out_result,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
-    context: *mut c_void,
-    scene_graph: *mut QemSceneGraphView,
-    policy: *const QemScenePolicy,
-    decisions: *const QemSceneMeshDecision,
-    num_decisions: u32,
-    base_options: *const QemSimplifyOptions,
-    execution_options: *const QemSceneExecutionOptions,
-    out_mesh_results: *mut QemSceneMeshResult,
-    mesh_result_capacity: u32,
-    out_result: *mut QemSceneSimplifyResult,
-) -> i32 {
-    if scene_graph.is_null() {
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    let graph_ref = unsafe { &mut *scene_graph };
-    let mut legacy_scene = QemSceneView {
-        meshes: graph_ref.meshes,
-        num_meshes: graph_ref.num_meshes,
-        nodes: std::ptr::null(),
-        num_nodes: 0,
-        root_node: -1,
-    };
-
-    unsafe {
-        qem_scene_apply_decisions_ex(
-            context,
-            &mut legacy_scene,
-            policy,
-            decisions,
-            num_decisions,
-            base_options,
-            execution_options,
-            out_mesh_results,
-            mesh_result_capacity,
-            out_result,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn qem_scene_simplify(
-    context: *mut c_void,
-    scene: *mut QemSceneView,
-    policy: *const QemScenePolicy,
-    base_options: *const QemSimplifyOptions,
-    out_decisions: *mut QemSceneMeshDecision,
-    decision_capacity: u32,
-    out_decision_count: *mut u32,
-    out_mesh_results: *mut QemSceneMeshResult,
-    mesh_result_capacity: u32,
-    out_result: *mut QemSceneSimplifyResult,
-) -> i32 {
-    unsafe {
-        qem_scene_simplify_ex(
-            context,
-            scene,
-            policy,
-            base_options,
-            std::ptr::null(),
-            out_decisions,
-            decision_capacity,
-            out_decision_count,
-            out_mesh_results,
-            mesh_result_capacity,
-            out_result,
-        )
-    }
-}
-
-#[no_mangle]
-pub unsafe extern "C" fn qem_scene_simplify_ex(
-    context: *mut c_void,
-    scene: *mut QemSceneView,
-    policy: *const QemScenePolicy,
-    base_options: *const QemSimplifyOptions,
-    execution_options: *const QemSceneExecutionOptions,
-    out_decisions: *mut QemSceneMeshDecision,
-    decision_capacity: u32,
-    out_decision_count: *mut u32,
-    out_mesh_results: *mut QemSceneMeshResult,
-    mesh_result_capacity: u32,
-    out_result: *mut QemSceneSimplifyResult,
-) -> i32 {
-    if context.is_null()
-        || scene.is_null()
-        || policy.is_null()
-        || base_options.is_null()
-        || out_decision_count.is_null()
-        || out_result.is_null()
-    {
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    let policy_value = unsafe { *policy };
-    report_progress_event(
-        context,
-        QemProgressEvent {
-            scope: QEM_PROGRESS_SCOPE_SCENE,
-            stage: QEM_PROGRESS_STAGE_BEGIN,
-            percent: 0.0,
-            mesh_index: 0,
-            mesh_count: 0,
-            source_triangles: 0,
-            target_triangles: 0,
-            output_triangles: 0,
-            status: QEM_STATUS_SUCCESS,
-        },
-    );
-
-    let (decisions, mut summary) =
-        match compute_decisions_internal(scene as *const QemSceneView, policy_value) {
-            Ok(v) => v,
-            Err(code) => {
-                unsafe {
-                    *out_decision_count = 0;
-                    *out_result = QemSceneSimplifyResult {
-                        status: code,
-                        ..QemSceneSimplifyResult::default()
-                    };
-                }
-                return code;
-            }
-        };
-
-    report_progress_event(
-        context,
-        QemProgressEvent {
-            scope: QEM_PROGRESS_SCOPE_SCENE,
-            stage: QEM_PROGRESS_STAGE_UPDATE,
-            percent: 0.1,
-            mesh_index: 0,
-            mesh_count: decisions.len() as u32,
-            source_triangles: summary.source_triangles.min(u32::MAX as u64) as u32,
-            target_triangles: summary.target_triangles.min(u32::MAX as u64) as u32,
-            output_triangles: summary.source_triangles.min(u32::MAX as u64) as u32,
-            status: QEM_STATUS_SUCCESS,
-        },
-    );
-
-    unsafe {
-        *out_decision_count = decisions.len() as u32;
-    }
-
-    if !out_decisions.is_null() {
-        if decision_capacity < decisions.len() as u32 {
-            summary.status = QEM_STATUS_INSUFFICIENT_BUFFER;
-            unsafe {
-                *out_result = summary;
-            }
-            return QEM_STATUS_INSUFFICIENT_BUFFER;
-        }
-        unsafe {
-            ptr::copy_nonoverlapping(decisions.as_ptr(), out_decisions, decisions.len());
-        }
-    } else if decision_capacity != 0 {
-        return QEM_STATUS_INVALID_ARGUMENT;
-    }
-
-    let apply_status = unsafe {
-        qem_scene_apply_decisions_ex(
-            context,
-            scene,
-            policy,
-            decisions.as_ptr(),
-            decisions.len() as u32,
-            base_options,
-            execution_options,
-            out_mesh_results,
-            mesh_result_capacity,
-            out_result,
-        )
-    };
-
-    apply_status
 }
 
 #[no_mangle]

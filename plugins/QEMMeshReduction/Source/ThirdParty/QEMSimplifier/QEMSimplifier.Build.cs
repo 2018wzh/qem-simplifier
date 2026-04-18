@@ -6,6 +6,7 @@ public class QEMSimplifier : ModuleRules
     public QEMSimplifier(ReadOnlyTargetRules Target) : base(Target)
     {
         Type = ModuleType.External;
+
         string ThirdPartyRoot = ModuleDirectory;
         string IncludeDir = Path.Combine(ThirdPartyRoot, "Include");
         string LibRoot = Path.Combine(ThirdPartyRoot, "Lib");
@@ -18,12 +19,12 @@ public class QEMSimplifier : ModuleRules
             string LibFile = Path.Combine(LibRoot, "Win64", "qem_simplifier.dll.lib");
             string DllFile = Path.Combine(BinRoot, "Win64", "qem_simplifier.dll");
             string PluginBinDir = Path.Combine(PluginDirectory, "Binaries", "Win64");
+            string PluginDllFile = Path.Combine(PluginBinDir, "qem_simplifier.dll");
 
             PublicAdditionalLibraries.Add(LibFile);
-            // Must match the real import name in UnrealEditor-QEMMeshReduction.dll
             PublicDelayLoadDLLs.Add("qem_simplifier.dll");
-
             PublicRuntimeLibraryPaths.Add(PluginBinDir);
+            RuntimeDependencies.Add(PluginDllFile, DllFile);
         }
         else if (Target.Platform == UnrealTargetPlatform.Linux)
         {
@@ -40,7 +41,6 @@ public class QEMSimplifier : ModuleRules
             PublicAdditionalLibraries.Add(StaticLib);
             PublicAdditionalLibraries.Add(Dylib);
             RuntimeDependencies.Add(Dylib);
-            
         }
     }
 }

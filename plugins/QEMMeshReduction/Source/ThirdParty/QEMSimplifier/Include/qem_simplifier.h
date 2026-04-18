@@ -133,18 +133,25 @@ struct QemSceneMeshView {
   QemMeshView mesh;
 };
 
-struct QemSceneNodeView {
+struct QemSceneGraphNodeView {
   int32_t parent_index;
-  int32_t mesh_index;
-  float world_matrix[16];
+  float local_matrix[16];
 };
 
-struct QemSceneView {
+struct QemSceneGraphMeshBindingView {
+  uint32_t node_index;
+  uint32_t mesh_index;
+  float mesh_to_node_matrix[16];
+  uint8_t use_mesh_to_node_matrix;
+};
+
+struct QemSceneGraphView {
   QemSceneMeshView *meshes;
   uint32_t num_meshes;
-  const QemSceneNodeView *nodes;
+  const QemSceneGraphNodeView *nodes;
   uint32_t num_nodes;
-  int32_t root_node;
+  const QemSceneGraphMeshBindingView *mesh_bindings;
+  uint32_t num_mesh_bindings;
 };
 
 struct QemScenePolicy {
@@ -182,27 +189,6 @@ struct QemSceneSimplifyResult {
   uint64_t output_triangles;
   double source_effective_triangles;
   double target_effective_triangles;
-};
-
-struct QemSceneGraphNodeView {
-  int32_t parent_index;
-  float local_matrix[16];
-};
-
-struct QemSceneGraphMeshBindingView {
-  uint32_t node_index;
-  uint32_t mesh_index;
-  float mesh_to_node_matrix[16];
-  uint8_t use_mesh_to_node_matrix;
-};
-
-struct QemSceneGraphView {
-  QemSceneMeshView *meshes;
-  uint32_t num_meshes;
-  const QemSceneGraphNodeView *nodes;
-  uint32_t num_nodes;
-  const QemSceneGraphMeshBindingView *mesh_bindings;
-  uint32_t num_mesh_bindings;
 };
 
 struct QemSceneExecutionOptions {
@@ -251,13 +237,6 @@ int32_t qem_scene_export_statistics_csv(const QemSceneMeshStatistics *mesh_stati
                                         uint32_t buffer_capacity,
                                         uint32_t *out_required_size);
 
-int32_t qem_scene_extract_features(const QemSceneView *scene,
-                                   const QemScenePolicy *policy,
-                                   QemSceneMeshFeature *out_features,
-                                   uint32_t feature_capacity,
-                                   uint32_t *out_feature_count,
-                                   QemSceneSimplifyResult *out_result);
-
 int32_t qem_scene_graph_extract_features(const QemSceneGraphView *graph,
                                          const QemScenePolicy *policy,
                                          QemSceneMeshFeature *out_features,
@@ -265,39 +244,12 @@ int32_t qem_scene_graph_extract_features(const QemSceneGraphView *graph,
                                          uint32_t *out_feature_count,
                                          QemSceneSimplifyResult *out_result);
 
-int32_t qem_scene_compute_decisions(const QemSceneView *scene,
-                                    const QemScenePolicy *policy,
-                                    QemSceneMeshDecision *out_decisions,
-                                    uint32_t decision_capacity,
-                                    uint32_t *out_decision_count,
-                                    QemSceneSimplifyResult *out_result);
-
 int32_t qem_scene_graph_compute_decisions(const QemSceneGraphView *graph,
                                           const QemScenePolicy *policy,
                                           QemSceneMeshDecision *out_decisions,
                                           uint32_t decision_capacity,
                                           uint32_t *out_decision_count,
                                           QemSceneSimplifyResult *out_result);
-
-int32_t qem_scene_apply_decisions(void *context,
-                                  QemSceneView *scene,
-                                  const QemSceneMeshDecision *decisions,
-                                  uint32_t num_decisions,
-                                  const QemSimplifyOptions *base_options,
-                                  QemSceneMeshResult *out_mesh_results,
-                                  uint32_t mesh_result_capacity,
-                                  QemSceneSimplifyResult *out_result);
-
-int32_t qem_scene_apply_decisions_ex(void *context,
-                                     QemSceneView *scene,
-                                     const QemScenePolicy *policy,
-                                     const QemSceneMeshDecision *decisions,
-                                     uint32_t num_decisions,
-                                     const QemSimplifyOptions *base_options,
-                                     const QemSceneExecutionOptions *execution_options,
-                                     QemSceneMeshResult *out_mesh_results,
-                                     uint32_t mesh_result_capacity,
-                                     QemSceneSimplifyResult *out_result);
 
 int32_t qem_scene_graph_apply_decisions(void *context,
                                         QemSceneGraphView *scene_graph,
@@ -318,29 +270,6 @@ int32_t qem_scene_graph_apply_decisions_ex(void *context,
                                            QemSceneMeshResult *out_mesh_results,
                                            uint32_t mesh_result_capacity,
                                            QemSceneSimplifyResult *out_result);
-
-int32_t qem_scene_simplify(void *context,
-                           QemSceneView *scene,
-                           const QemScenePolicy *policy,
-                           const QemSimplifyOptions *base_options,
-                           QemSceneMeshDecision *out_decisions,
-                           uint32_t decision_capacity,
-                           uint32_t *out_decision_count,
-                           QemSceneMeshResult *out_mesh_results,
-                           uint32_t mesh_result_capacity,
-                           QemSceneSimplifyResult *out_result);
-
-int32_t qem_scene_simplify_ex(void *context,
-                              QemSceneView *scene,
-                              const QemScenePolicy *policy,
-                              const QemSimplifyOptions *base_options,
-                              const QemSceneExecutionOptions *execution_options,
-                              QemSceneMeshDecision *out_decisions,
-                              uint32_t decision_capacity,
-                              uint32_t *out_decision_count,
-                              QemSceneMeshResult *out_mesh_results,
-                              uint32_t mesh_result_capacity,
-                              QemSceneSimplifyResult *out_result);
 
 int32_t qem_scene_graph_simplify(void *context,
                                  QemSceneGraphView *scene_graph,

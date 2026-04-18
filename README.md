@@ -1,240 +1,236 @@
 # qem-simplifier
 
-一个面向实时与离线场景的网格简化库，基于 QEM（Quadric Error Metrics）实现，提供：
+`qem-simplifier` 是一个面向实时与离线流程的网格简化库，基于 QEM（Quadric Error Metrics）实现，提供：
 
-- Rust API（`rlib`）
+- Rust 库（`rlib`）
 - C ABI 动态库（`cdylib`）
+- 静态库（`staticlib`）
 - 命令行工具（`qem-cli`）
 
-可用于接入任意引擎或工具链（自研引擎、Unity 原生插件、Godot、离线处理管线等）。
+适用于引擎插件、资产管线、批处理和离线预处理。
 
-## 特性
+---
 
-- 支持按目标三角形数/顶点数/误差阈值进行简化
-- 支持最小保留下限（`min_vertices` / `min_triangles`）
-- 支持表面积保护（`preserve_surface_area`）
-- 支持顶点附加属性与权重（法线、UV、颜色等）
-- 支持场景级输入（场景树/通用场景图）并进行全局预算分配
-- 支持“决策算法（分配比例）”与“按比例执行简化”解耦
-- 支持“场景特征提取 → 预算求解 → 并行局部QEM执行”的分步管线
-- 支持场景统计计算与 CSV 文本导出（用于审计与可观测）
-- 通过 C ABI 可跨语言调用
+## 新 API 标准（当前：ABI v7）
+
+从 ABI v7 开始，**场景能力统一采用场景图 API**：
+
+- 数据模型统一为 `QemSceneGraphView`
+- 场景接口统一为 `qem_scene_graph_*`
+- 旧场景树接口（如 `QemSceneView`、`qem_scene_*`）不再作为标准接入面
+
+启动时建议先做版本门禁：
+
+1. 加载动态库
+2. 调用 `qem_get_abi_version()`
+3. 仅当返回 `7` 时启用场景图能力
+
+---
+
+## 核心能力
+
+- 单网格简化：按目标三角形数/顶点数/误差阈值控制
+- 场景图简化：支持 `节点层级 + mesh 绑定` 的通用输入
+- 分步流程：特征提取 → 预算决策 → 执行（可插入业务策略）
+- 一步流程：场景图一键完成决策与执行
+- 统计与 CSV 导出：支持预算命中率、偏差、误差等观测
+- 回调能力：日志回调 + 进度回调
+
+---
 
 ## 仓库结构
 
-- `src/lib.rs`：核心库与 C ABI 导出
-- `src/main.rs`：CLI 工具入口（`qem-cli`）
-- `include/qem_simplifier.h`：C 接口头文件
-- `docs/接入指南.md`：跨引擎接入说明
-- `docs/数据结构标准.md`：ABI 数据结构标准与版本约束
-- `build.rs` + `cbindgen.toml`：头文件自动生成
+- `src/lib.rs`：核心算法与 C ABI 导出
+- `src/scene.rs`：场景图决策与执行
+- `src/main.rs`：CLI 入口
+- `src/cli/`：`model` / `scene` 子命令实现
+- `include/qem_simplifier.h`：C 头文件（构建时自动生成）
+- `docs/接入指南.md`：跨引擎接入与写回契约
+- `docs/数据结构标准.md`：结构体字段级标准
+- `build.rs`：头文件生成与插件目录同步逻辑
 
-## 环境要求
-
-- Rust 工具链（建议稳定版）
-- Cargo
+---
 
 ## 构建
 
-### 调试构建
+调试构建：
 
 ```bash
 cargo build
 ```
 
-### 发布构建
+发布构建：
 
 ```bash
 cargo build --release
 ```
 
-构建产物（按平台）：
+主要产物（按平台）：
 
-- Windows: `target/<profile>/qem_simplifier.dll`
-- Linux: `target/<profile>/libqem_simplifier.so`
-- macOS: `target/<profile>/libqem_simplifier.dylib`
+- Windows：`target/<profile>/qem_simplifier.dll`
+- Linux：`target/<profile>/libqem_simplifier.so`
+- macOS：`target/<profile>/libqem_simplifier.dylib`
+- CLI：`target/<profile>/qem-cli[.exe]`
 
 其中 `<profile>` 为 `debug` 或 `release`。
 
-## 运行 CLI
+> 构建时会自动生成 `include/qem_simplifier.h`，并在插件目录存在时同步到：
+>
+> - `plugins/QEMMeshReduction/Source/ThirdParty/QEMSimplifier/Include/`
+> - `plugins/QEMLevelSceneSimplifier/Source/ThirdParty/QEMSimplifier/Include/`
 
-当前二进制名：`qem-cli`。
+---
 
-查看帮助：
+## C ABI 接口总览
 
-```bash
-cargo run --bin qem-cli -- --help
-```
+### 基础能力
 
-示例（OBJ）：
-
-```bash
-cargo run --bin qem-cli -- \
-  --input input.obj \
-  --output output.obj \
-  --ratio 0.5 \
-  --target-triangles 10000 \
-  --min-triangles 1000
-```
-
-示例（GLB/GLTF）：
-
-```bash
-cargo run --bin qem-cli -- \
-  --input input.glb \
-  --output output.obj \
-  --target-triangles 20000
-```
-
-> CLI 当前输出为 OBJ。
-
-## C ABI 快速说明
-
-核心导出函数：
-
-- `register_log_callback`
-- `qem_context_set_progress_callback`
-- `qem_context_clear_progress_callback`
-- `qem_get_abi_version`
 - `qem_context_create`
 - `qem_context_destroy`
 - `qem_get_last_result`
 - `qem_simplify`
-- `qem_scene_compute_decisions`
-- `qem_scene_extract_features`
-- `qem_scene_apply_decisions`
-- `qem_scene_apply_decisions_ex`
-- `qem_scene_simplify`
-- `qem_scene_simplify_ex`
-- `qem_scene_graph_compute_decisions`
+
+### 场景图能力（标准入口）
+
 - `qem_scene_graph_extract_features`
+- `qem_scene_graph_compute_decisions`
 - `qem_scene_graph_apply_decisions`
 - `qem_scene_graph_apply_decisions_ex`
 - `qem_scene_graph_simplify`
 - `qem_scene_graph_simplify_ex`
+
+### 统计与导出
+
 - `qem_scene_compute_statistics`
 - `qem_scene_export_statistics_csv`
 
-关键结构体：
+### 回调
 
-- `QemMeshView`
-- `QemProgressEvent`
-- `QemSimplifyOptions`
-- `QemSimplifyResult`
-- `QemSceneMeshView`
-- `QemSceneMeshFeature`
-- `QemSceneNodeView`
-- `QemSceneView`
-- `QemSceneGraphNodeView`
-- `QemSceneGraphMeshBindingView`
-- `QemSceneGraphView`
-- `QemScenePolicy`
-- `QemSceneMeshDecision`
-- `QemSceneMeshResult`
-- `QemSceneSimplifyResult`
-- `QemSceneExecutionOptions`
-- `QemSceneMeshStatistics`
-- `QemSceneStatisticsSummary`
+- `register_log_callback`
+- `qem_context_set_progress_callback`
+- `qem_context_clear_progress_callback`
 
-状态码：
+---
+
+## 场景图标准数据模型
+
+场景输入由三部分组成：
+
+- `QemSceneGraphView.meshes`：可写 mesh 池（执行时原地写回）
+- `QemSceneGraphView.nodes`：节点层级（`parent_index` + `local_matrix`）
+- `QemSceneGraphView.mesh_bindings`：mesh 与节点绑定（支持实例化）
+
+关键说明：
+
+- 同一 `mesh_index` 可出现在多个 binding 中（共享几何，多实例）
+- 当 `QemScenePolicy.use_world_scale != 0` 时，权重会结合节点累计尺度
+- 若 `QemSceneGraphMeshBindingView.use_mesh_to_node_matrix != 0`，将叠加该绑定矩阵参与尺度评估
+
+---
+
+## 推荐调用流程
+
+### A. 分步流程（推荐生产）
+
+1. `qem_scene_graph_extract_features`
+2. `qem_scene_graph_compute_decisions`
+3. （可选）业务侧审阅或覆盖决策
+4. `qem_scene_graph_apply_decisions_ex`
+5. `qem_scene_compute_statistics`
+6. `qem_scene_export_statistics_csv`
+
+适合：需要审计、预算复核、策略回放的离线或平台流程。
+
+### B. 一步流程（快速接入）
+
+1. `qem_scene_graph_simplify_ex`
+2. （可选）`qem_scene_compute_statistics`
+
+适合：工具化场景、快速集成验证。
+
+---
+
+## 容量契约（务必遵守）
+
+凡是带 `out_xxx + capacity + out_xxx_count` 的接口，均支持两段式调用：
+
+1. 首次调用仅探测数量（缓冲区可空或容量为 0）
+2. 按返回数量分配后再次调用
+
+`qem_scene_export_statistics_csv` 同理：
+
+1. `out_buffer = nullptr` 获取 `out_required_size`
+2. 分配后再次写入
+
+容量不足返回：`QEM_STATUS_INSUFFICIENT_BUFFER`。
+
+---
+
+## 写回与失败语义
+
+- 成功时：执行类接口会原地回写 mesh 几何前缀，并更新 `num_vertices/num_indices`
+- 失败时：计数字段保持调用前值，但数组可能存在部分中间写入
+- 场景执行按 mesh 独立记录 `QemSceneMeshResult`，建议按 mesh 粒度处理回滚
+
+---
+
+## 状态码
 
 - `QEM_STATUS_SUCCESS = 0`
 - `QEM_STATUS_INVALID_ARGUMENT = -1`
 - `QEM_STATUS_PANIC = -2`
 - `QEM_STATUS_INSUFFICIENT_BUFFER = -3`
 
-场景权重模式常量：
+建议同时检查“函数返回值 + out_result.status”。
 
-- `QEM_SCENE_WEIGHT_UNIFORM`
-- `QEM_SCENE_WEIGHT_MESH_VOLUME`
-- `QEM_SCENE_WEIGHT_MESH_VOLUME_X_INSTANCES`
-- `QEM_SCENE_WEIGHT_EXTERNAL`
+---
 
-进度回调常量：
+## CLI 使用
 
-- `QEM_PROGRESS_SCOPE_MESH`
-- `QEM_PROGRESS_SCOPE_SCENE`
-- `QEM_PROGRESS_STAGE_BEGIN`
-- `QEM_PROGRESS_STAGE_UPDATE`
-- `QEM_PROGRESS_STAGE_END`
-
-写回契约（摘要）：
-
-- `qem_simplify` 成功后会回写 `QemMeshView.num_vertices/num_indices`，且数组有效数据位于前缀。
-- 场景执行接口会逐 mesh 回写 `QemSceneView.meshes[i].mesh.num_vertices/num_indices`。
-- 场景图执行接口会逐 mesh 回写 `QemSceneGraphView.meshes[i].mesh.num_vertices/num_indices`。
-- 失败时计数字段保持调用前值；如需强一致回滚，建议调用方做输入快照。
-
-## 场景简化框架（分层）
-
-框架分为三层：
-
-1. **场景输入层**：
-  - `QemSceneView`（legacy）：`meshes + nodes`，每个节点最多绑定一个 mesh；
-  - `QemSceneGraphView`（推荐）：`meshes + nodes + mesh_bindings`，节点与 mesh 绑定解耦，支持多实例。  
-2. **决策层**：`qem_scene_compute_decisions` 根据 `QemScenePolicy` 计算每个 mesh 的 `keep_ratio/target_triangles`。  
-3. **执行层**：`qem_scene_apply_decisions` 对各 mesh 做局部 QEM，并行执行（多核 CPU）。  
-
-这使得“如何分配预算”可以按业务替换，而“如何执行简化”保持稳定。
-
-分步调用建议：
-
-1. `qem_scene_extract_features`：提取体积/实例规模/初始面数等特征；
-2. `qem_scene_compute_decisions`：基于非线性权重与下限钳制计算 `Target_i`；
-3. `qem_scene_apply_decisions`：并发执行局部 QEM。
-
-若输入已是通用场景图（引擎层级 + 绑定关系）：
-
-1. `qem_scene_graph_extract_features`
-2. `qem_scene_graph_compute_decisions`
-3. `qem_scene_graph_apply_decisions`
-
-可选增强入口：
-
-- `qem_scene_apply_decisions_ex`
-- `qem_scene_simplify_ex`
-
-通过 `QemSceneExecutionOptions` 配置并行线程上限、失败重试次数、目标回退步长。
-
-## 引擎与 CLI 的 FBX 离线接入建议
-
-- 引擎侧（UE/Unity/自研）可先将 FBX 解析为统一场景内存结构（mesh + node tree），再调用场景 API。  
-- 推荐优先映射到 `QemSceneGraphView`：节点层级与 mesh 绑定分离，更贴合 FBX/引擎实例化语义。  
-- CLI 侧建议通过 FBX 解析器（如 Assimp/FBX SDK/引擎导出流程）生成统一场景数据后调用：
-  - 先 `qem_scene_graph_compute_decisions` 导出审阅结果；
-  - 再 `qem_scene_graph_apply_decisions` 执行离线简化；
-  - 如需一步到位可直接 `qem_scene_graph_simplify`。
-
-## 跨引擎接入
-
-请直接阅读：`docs/接入指南.md`
-
-数据结构标准请阅读：`docs/数据结构标准.md`
-
-该文档包含：
-
-- 完整数据契约（数组布局、长度要求、原地写回规则）
-- 通用调用流程（create → simplify → destroy）
-- 线程与生命周期建议
-- 最小验收清单
-
-## 开发与验证
-
-运行测试：
+查看帮助：
 
 ```bash
-cargo test
+cargo run --release -- --help
 ```
 
-格式与质量建议（可选）：
+单网格简化：
+
+```bash
+cargo run --release -- model -i ./data/input.obj -o ./data/output.obj -r 0.5
+```
+
+场景图简化（FBX/GLB 输入，GLB 输出）：
+
+```bash
+cargo run --release -- scene -i ./data/Demo.FBX -o ./data/demo.glb -r 0.5
+```
+
+开启详细日志：
+
+```bash
+cargo run --release -- -v scene -i ./data/Demo.FBX -o ./data/demo.glb -r 0.5 --dry-run
+```
+
+---
+
+## 开发验证
+
+```bash
+cargo test --release
+```
+
+可选：
 
 ```bash
 cargo fmt
 cargo clippy --all-targets --all-features -- -D warnings
 ```
 
-## 版本与兼容性
+---
 
-- 当前 ABI 版本：`6`（通过 `qem_get_abi_version()` 获取）
-- 对接方建议在加载后先做 ABI 版本校验
+## 文档导航
+
+- 接入与写回契约：`docs/接入指南.md`
+- 数据结构标准：`docs/数据结构标准.md`
+- C 头文件权威定义：`include/qem_simplifier.h`
 

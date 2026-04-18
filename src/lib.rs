@@ -315,7 +315,7 @@ pub unsafe extern "C" fn qem_context_clear_progress_callback(context: *mut c_voi
 
 #[no_mangle]
 pub extern "C" fn qem_get_abi_version() -> u32 {
-    6
+    7
 }
 
 #[no_mangle]

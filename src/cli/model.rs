@@ -1,18 +1,22 @@
-use std::path::Path;
-use std::fs::File;
-use std::io::{BufWriter, Write};
-use crate::{
-    qem_context_create, qem_context_destroy, qem_simplify, QemMeshView,
-    QemSimplifyOptions, QemSimplifyResult, QEM_STATUS_SUCCESS,
-};
-use super::ModelArgs;
 use super::progress::{CliProgressGuard, CliProgressScope};
+use super::ModelArgs;
+use crate::{
+    qem_context_create, qem_context_destroy, qem_simplify, QemMeshView, QemSimplifyOptions,
+    QemSimplifyResult, QEM_STATUS_SUCCESS,
+};
 use gltf_json as json;
 use json::validation::Checked::Valid;
+use std::fs::File;
+use std::io::{BufWriter, Write};
+use std::path::Path;
 
-pub fn handle_model(args: &ModelArgs) -> Result<(), Box<dyn std::error::Error>> {
+pub fn handle_model(args: &ModelArgs, _verbose: bool) -> Result<(), Box<dyn std::error::Error>> {
     let input_path = Path::new(&args.input);
-    let ext = input_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let ext = input_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
 
     let (mut vertices, mut indices, mut material_ids) = match ext.as_str() {
         "obj" => load_obj(input_path)?,
@@ -30,13 +34,20 @@ pub fn handle_model(args: &ModelArgs) -> Result<(), Box<dyn std::error::Error>> 
     simplify_mesh(&mut vertices, &mut indices, &mut material_ids, settings)?;
 
     let output_path = Path::new(&args.output);
-    let out_ext = output_path.extension().and_then(|s| s.to_str()).unwrap_or("").to_lowercase();
+    let out_ext = output_path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_lowercase();
 
     match out_ext.as_str() {
         "obj" => save_obj(output_path, &vertices, &indices)?,
         "glb" => save_glb(output_path, &vertices, &indices)?,
         _ => {
-            println!("Defaulting to OBJ output for unknown extension: {}", out_ext);
+            println!(
+                "Defaulting to OBJ output for unknown extension: {}",
+                out_ext
+            );
             save_obj(output_path, &vertices, &indices)?;
         }
     }
@@ -86,7 +97,8 @@ fn simplify_mesh(
         return Err(format!(
             "qem_simplify failed. status={}, result_status={}",
             status, result.status
-        ).into());
+        )
+        .into());
     }
 
     vertices.truncate(result.num_vertices as usize * 3);
@@ -118,7 +130,11 @@ fn load_obj(path: &Path) -> Result<(Vec<f32>, Vec<u32>, Vec<i32>), Box<dyn std::
     Ok((all_vertices, all_indices, all_material_ids))
 }
 
-fn save_obj(path: &Path, vertices: &[f32], indices: &[u32]) -> Result<(), Box<dyn std::error::Error>> {
+fn save_obj(
+    path: &Path,
+    vertices: &[f32],
+    indices: &[u32],
+) -> Result<(), Box<dyn std::error::Error>> {
     let file = File::create(path)?;
     let mut writer = BufWriter::new(file);
 
@@ -149,13 +165,13 @@ fn load_glb(path: &Path) -> Result<(Vec<f32>, Vec<u32>, Vec<i32>), Box<dyn std::
                 Some(read) => read.into_u32().collect(),
                 None => continue,
             };
-            
+
             let offset = (all_vertices.len() / 3) as u32;
             all_vertices.extend(vertices);
             for idx in indices {
                 all_indices.push(idx + offset);
             }
-            
+
             // For now, we don't have a good way to track materials in model mode, just use 0
             let num_tris = all_indices.len() / 3;
             all_material_ids.resize(num_tris, 0);
@@ -164,14 +180,18 @@ fn load_glb(path: &Path) -> Result<(Vec<f32>, Vec<u32>, Vec<i32>), Box<dyn std::
     Ok((all_vertices, all_indices, all_material_ids))
 }
 
-fn save_glb(path: &Path, vertices: &[f32], indices: &[u32]) -> Result<(), Box<dyn std::error::Error>> {
+fn save_glb(
+    path: &Path,
+    vertices: &[f32],
+    indices: &[u32],
+) -> Result<(), Box<dyn std::error::Error>> {
     let mut root = json::Root::default();
 
     let mut vertex_data = Vec::new();
     for &v in vertices {
         vertex_data.extend_from_slice(&v.to_le_bytes());
     }
-    
+
     let mut index_data = Vec::new();
     for &i in indices {
         index_data.extend_from_slice(&i.to_le_bytes());
@@ -215,7 +235,9 @@ fn save_glb(path: &Path, vertices: &[f32], indices: &[u32]) -> Result<(), Box<dy
         buffer_view: Some(vertex_bv),
         byte_offset: Some(json::validation::USize64(0)),
         count: json::validation::USize64((vertices.len() / 3) as u64),
-        component_type: Valid(json::accessor::GenericComponentType(json::accessor::ComponentType::F32)),
+        component_type: Valid(json::accessor::GenericComponentType(
+            json::accessor::ComponentType::F32,
+        )),
         extensions: Default::default(),
         extras: Default::default(),
         type_: Valid(json::accessor::Type::Vec3),
@@ -230,7 +252,9 @@ fn save_glb(path: &Path, vertices: &[f32], indices: &[u32]) -> Result<(), Box<dy
         buffer_view: Some(index_bv),
         byte_offset: Some(json::validation::USize64(0)),
         count: json::validation::USize64(indices.len() as u64),
-        component_type: Valid(json::accessor::GenericComponentType(json::accessor::ComponentType::U32)),
+        component_type: Valid(json::accessor::GenericComponentType(
+            json::accessor::ComponentType::U32,
+        )),
         extensions: Default::default(),
         extras: Default::default(),
         type_: Valid(json::accessor::Type::Scalar),
@@ -277,12 +301,14 @@ fn save_glb(path: &Path, vertices: &[f32], indices: &[u32]) -> Result<(), Box<dy
 
     let json_string = json::serialize::to_string(&root)?;
     let mut json_offset = json_string.len();
-    while json_offset % 4 != 0 { json_offset += 1; }
+    while json_offset % 4 != 0 {
+        json_offset += 1;
+    }
 
     let mut glb = Vec::new();
     glb.extend_from_slice(b"glTF");
     glb.extend_from_slice(&2u32.to_le_bytes());
-    
+
     let total_length = 12 + 8 + json_offset + 8 + buffer_data.len();
     glb.extend_from_slice(&(total_length as u32).to_le_bytes());
 
