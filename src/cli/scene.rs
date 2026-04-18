@@ -1,26 +1,312 @@
 use super::progress::{CliProgressGuard, CliProgressScope};
 use super::SceneArgs;
 use crate::scene::{
-    qem_scene_graph_compute_decisions, qem_scene_graph_simplify, QemSceneGraphMeshBindingView,
-    QemSceneGraphNodeView, QemSceneGraphView, QemSceneMeshDecision, QemSceneMeshResult,
-    QemSceneMeshView, QemScenePolicy, QemSceneSimplifyResult,
+    qem_scene_graph_compute_decisions, qem_scene_graph_simplify_ex,
+    QemSceneExecutionOptions, QemSceneGraphMeshBindingView, QemSceneGraphNodeView,
+    QemSceneGraphView, QemSceneMeshDecision, QemSceneMeshResult, QemSceneMeshView,
+    QemScenePolicy, QemSceneSimplifyResult,
 };
 use crate::{
     qem_context_create, qem_context_destroy, QemMeshView, QemSimplifyOptions, QEM_STATUS_SUCCESS,
 };
 use console::Term;
-use glam::Mat4;
+use gltf_json as json;
+use json::validation::Checked::Valid;
 use supports_unicode::Stream;
 use std::collections::HashMap;
 use std::io::IsTerminal;
 use std::path::Path;
-use ufbx::{load_file as load_fbx, LoadOpts as FbxOpts};
 
 const PREVIEW_MAX_MESH_DECISIONS: usize = 24;
 const PREVIEW_MAX_SCENE_NODES: usize = 200;
+const SCENE_ATTR_NORMAL: u32 = 3;
+const SCENE_ATTR_UV0: u32 = 2;
+const SCENE_ATTR_COLOR0: u32 = 4;
+const SCENE_NUM_ATTRIBUTES: u32 = SCENE_ATTR_NORMAL + SCENE_ATTR_UV0 + SCENE_ATTR_COLOR0;
+
+#[derive(Debug, Default)]
+struct SceneMeshData {
+    name: Option<String>,
+    vertices: Vec<f32>,
+    indices: Vec<u32>,
+    material_ids: Vec<i32>,
+    num_attributes: u32,
+    attribute_weights: Vec<f32>,
+}
+
+#[derive(Debug, Default)]
+struct SceneExportMetadata {
+    material_descriptors: Vec<MaterialDescriptor>,
+    node_names: Vec<Option<String>>,
+    image_descriptors: Vec<ImageDescriptor>,
+    sampler_descriptors: Vec<SamplerDescriptor>,
+    texture_descriptors: Vec<TextureDescriptor>,
+}
+
+#[derive(Debug, Clone)]
+struct MaterialDescriptor {
+    name: String,
+    base_color_factor: [f32; 4],
+    metallic_factor: f32,
+    roughness_factor: f32,
+    emissive_factor: [f32; 3],
+    alpha_mode: json::material::AlphaMode,
+    alpha_cutoff: Option<f32>,
+    double_sided: bool,
+    base_color_texture: Option<TextureInfoDescriptor>,
+    metallic_roughness_texture: Option<TextureInfoDescriptor>,
+    normal_texture: Option<NormalTextureDescriptor>,
+    occlusion_texture: Option<OcclusionTextureDescriptor>,
+    emissive_texture: Option<TextureInfoDescriptor>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct ImageDescriptor {
+    mime_type: Option<String>,
+    uri: Option<String>,
+    data: Option<Vec<u8>>,
+}
+
+#[derive(Debug, Clone)]
+struct SamplerDescriptor {
+    mag_filter: Option<json::texture::MagFilter>,
+    min_filter: Option<json::texture::MinFilter>,
+    wrap_s: json::texture::WrappingMode,
+    wrap_t: json::texture::WrappingMode,
+}
+
+#[derive(Debug, Clone)]
+struct TextureDescriptor {
+    source_image_index: usize,
+    sampler_index: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextureInfoDescriptor {
+    texture_index: usize,
+    tex_coord: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NormalTextureDescriptor {
+    texture_index: usize,
+    tex_coord: u32,
+    scale: f32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OcclusionTextureDescriptor {
+    texture_index: usize,
+    tex_coord: u32,
+    strength: f32,
+}
+
+impl Default for MaterialDescriptor {
+    fn default() -> Self {
+        Self {
+            name: "material_0".to_string(),
+            base_color_factor: [1.0, 1.0, 1.0, 1.0],
+            metallic_factor: 1.0,
+            roughness_factor: 1.0,
+            emissive_factor: [0.0, 0.0, 0.0],
+            alpha_mode: json::material::AlphaMode::Opaque,
+            alpha_cutoff: None,
+            double_sided: false,
+            base_color_texture: None,
+            metallic_roughness_texture: None,
+            normal_texture: None,
+            occlusion_texture: None,
+            emissive_texture: None,
+        }
+    }
+}
+
+impl Default for SamplerDescriptor {
+    fn default() -> Self {
+        Self {
+            mag_filter: None,
+            min_filter: None,
+            wrap_s: json::texture::WrappingMode::Repeat,
+            wrap_t: json::texture::WrappingMode::Repeat,
+        }
+    }
+}
+
+fn mesh_stride(num_attributes: u32) -> usize {
+    (3 + num_attributes) as usize
+}
+
+fn default_attribute_weights(num_attributes: u32) -> Vec<f32> {
+    if num_attributes == 0 {
+        Vec::new()
+    } else {
+        vec![1.0; num_attributes as usize]
+    }
+}
+
+fn default_material_descriptor(name: String) -> MaterialDescriptor {
+    MaterialDescriptor {
+        name,
+        ..Default::default()
+    }
+}
+
+fn clamp_unit_or(value: f32, default: f32) -> f32 {
+    if value.is_finite() {
+        value.clamp(0.0, 1.0)
+    } else {
+        default
+    }
+}
+
+fn ensure_material_descriptor(
+    material_descriptors: &mut Vec<MaterialDescriptor>,
+    descriptor: MaterialDescriptor,
+) -> i32 {
+    material_descriptors.push(descriptor);
+    (material_descriptors.len() - 1) as i32
+}
+
+fn material_descriptor_from_gltf(material: &gltf::Material<'_>) -> MaterialDescriptor {
+    let pbr = material.pbr_metallic_roughness();
+
+    let base_color_texture = pbr.base_color_texture().map(|info| TextureInfoDescriptor {
+        texture_index: info.texture().index(),
+        tex_coord: info.tex_coord(),
+    });
+
+    let metallic_roughness_texture =
+        pbr.metallic_roughness_texture().map(|info| TextureInfoDescriptor {
+            texture_index: info.texture().index(),
+            tex_coord: info.tex_coord(),
+        });
+
+    let normal_texture = material.normal_texture().map(|normal| NormalTextureDescriptor {
+        texture_index: normal.texture().index(),
+        tex_coord: normal.tex_coord(),
+        scale: normal.scale(),
+    });
+
+    let occlusion_texture = material
+        .occlusion_texture()
+        .map(|occlusion| OcclusionTextureDescriptor {
+            texture_index: occlusion.texture().index(),
+            tex_coord: occlusion.tex_coord(),
+            strength: occlusion.strength(),
+        });
+
+    let emissive_texture = material.emissive_texture().map(|info| TextureInfoDescriptor {
+        texture_index: info.texture().index(),
+        tex_coord: info.tex_coord(),
+    });
+
+    MaterialDescriptor {
+        name: material
+            .name()
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("material_{}", material.index().unwrap_or(0))),
+        base_color_factor: pbr.base_color_factor(),
+        metallic_factor: clamp_unit_or(pbr.metallic_factor(), 1.0),
+        roughness_factor: clamp_unit_or(pbr.roughness_factor(), 1.0),
+        emissive_factor: material.emissive_factor(),
+        alpha_mode: material.alpha_mode(),
+        alpha_cutoff: material.alpha_cutoff(),
+        double_sided: material.double_sided(),
+        base_color_texture,
+        metallic_roughness_texture,
+        normal_texture,
+        occlusion_texture,
+        emissive_texture,
+    }
+}
+
+fn map_texture_info(
+    info: TextureInfoDescriptor,
+    texture_index_map: &[Option<json::Index<json::Texture>>],
+) -> Option<json::texture::Info> {
+    let texture = texture_index_map
+        .get(info.texture_index)
+        .and_then(|index| *index)?;
+
+    Some(json::texture::Info {
+        index: texture,
+        tex_coord: info.tex_coord,
+        extensions: Default::default(),
+        extras: Default::default(),
+    })
+}
+
+fn map_normal_texture(
+    info: NormalTextureDescriptor,
+    texture_index_map: &[Option<json::Index<json::Texture>>],
+) -> Option<json::material::NormalTexture> {
+    let texture = texture_index_map
+        .get(info.texture_index)
+        .and_then(|index| *index)?;
+
+    Some(json::material::NormalTexture {
+        index: texture,
+        scale: info.scale,
+        tex_coord: info.tex_coord,
+        extensions: Default::default(),
+        extras: Default::default(),
+    })
+}
+
+fn map_occlusion_texture(
+    info: OcclusionTextureDescriptor,
+    texture_index_map: &[Option<json::Index<json::Texture>>],
+) -> Option<json::material::OcclusionTexture> {
+    let texture = texture_index_map
+        .get(info.texture_index)
+        .and_then(|index| *index)?;
+
+    Some(json::material::OcclusionTexture {
+        index: texture,
+        strength: json::material::StrengthFactor(info.strength),
+        tex_coord: info.tex_coord,
+        extensions: Default::default(),
+        extras: Default::default(),
+    })
+}
+
+fn build_json_material(
+    descriptor: &MaterialDescriptor,
+    texture_index_map: &[Option<json::Index<json::Texture>>],
+) -> json::Material {
+    json::Material {
+        name: Some(descriptor.name.clone()),
+        alpha_cutoff: descriptor.alpha_cutoff.map(json::material::AlphaCutoff),
+        alpha_mode: Valid(descriptor.alpha_mode),
+        double_sided: descriptor.double_sided,
+        pbr_metallic_roughness: json::material::PbrMetallicRoughness {
+            base_color_factor: json::material::PbrBaseColorFactor(descriptor.base_color_factor),
+            metallic_factor: json::material::StrengthFactor(descriptor.metallic_factor),
+            roughness_factor: json::material::StrengthFactor(descriptor.roughness_factor),
+            base_color_texture: descriptor
+                .base_color_texture
+                .and_then(|info| map_texture_info(info, texture_index_map)),
+            metallic_roughness_texture: descriptor
+                .metallic_roughness_texture
+                .and_then(|info| map_texture_info(info, texture_index_map)),
+            ..Default::default()
+        },
+        normal_texture: descriptor
+            .normal_texture
+            .and_then(|info| map_normal_texture(info, texture_index_map)),
+        occlusion_texture: descriptor
+            .occlusion_texture
+            .and_then(|info| map_occlusion_texture(info, texture_index_map)),
+        emissive_texture: descriptor
+            .emissive_texture
+            .and_then(|info| map_texture_info(info, texture_index_map)),
+        emissive_factor: json::material::EmissiveFactor(descriptor.emissive_factor),
+        ..Default::default()
+    }
+}
 
 fn print_scene_input_diagnostics(
-    mesh_data: &[(Vec<f32>, Vec<u32>, Vec<i32>)],
+    mesh_data: &[SceneMeshData],
     scene_nodes: &[QemSceneGraphNodeView],
     mesh_bindings: &[QemSceneGraphMeshBindingView],
     root_node: i32,
@@ -29,25 +315,28 @@ fn print_scene_input_diagnostics(
     let mut invalid_mesh_samples = Vec::new();
     let mut total_source_triangles = 0u64;
 
-    for (mesh_index, (vertices, indices, material_ids)) in mesh_data.iter().enumerate() {
-        let tri_count = indices.len() / 3;
+    for (mesh_index, mesh) in mesh_data.iter().enumerate() {
+        let tri_count = mesh.indices.len() / 3;
         total_source_triangles += tri_count as u64;
 
-        let valid = !vertices.is_empty()
-            && vertices.len() % 3 == 0
-            && !indices.is_empty()
-            && indices.len() % 3 == 0
-            && material_ids.len() == tri_count;
+        let stride = mesh_stride(mesh.num_attributes);
+
+        let valid = !mesh.vertices.is_empty()
+            && mesh.vertices.len() % stride == 0
+            && !mesh.indices.is_empty()
+            && mesh.indices.len() % 3 == 0
+            && mesh.material_ids.len() == tri_count;
 
         if !valid {
             invalid_mesh_count += 1;
             if invalid_mesh_samples.len() < 8 {
                 invalid_mesh_samples.push(format!(
-                    "mesh[{}]: vertices={}, indices={}, material_ids={}",
+                    "mesh[{}]: vertices={}, stride={}, indices={}, material_ids={}",
                     mesh_index,
-                    vertices.len(),
-                    indices.len(),
-                    material_ids.len()
+                    mesh.vertices.len(),
+                    stride,
+                    mesh.indices.len(),
+                    mesh.material_ids.len()
                 ));
             }
         }
@@ -123,36 +412,49 @@ fn print_scene_input_diagnostics(
 }
 
 fn validate_scene_input(
-    mesh_data: &[(Vec<f32>, Vec<u32>, Vec<i32>)],
+    mesh_data: &[SceneMeshData],
     scene_nodes: &[QemSceneGraphNodeView],
     mesh_bindings: &[QemSceneGraphMeshBindingView],
 ) -> Result<(), Box<dyn std::error::Error>> {
-    for (mesh_index, (vertices, indices, material_ids)) in mesh_data.iter().enumerate() {
-        if vertices.is_empty() || vertices.len() % 3 != 0 {
+    for (mesh_index, mesh) in mesh_data.iter().enumerate() {
+        let stride = mesh_stride(mesh.num_attributes);
+
+        if mesh.vertices.is_empty() || mesh.vertices.len() % stride != 0 {
             return Err(format!(
-                "Invalid mesh[{}]: vertices len={} (expected non-empty and multiple of 3)",
+                "Invalid mesh[{}]: vertices len={} (expected non-empty and multiple of {})",
                 mesh_index,
-                vertices.len()
+                mesh.vertices.len(),
+                stride
             )
             .into());
         }
 
-        if indices.is_empty() || indices.len() % 3 != 0 {
+        if mesh.indices.is_empty() || mesh.indices.len() % 3 != 0 {
             return Err(format!(
                 "Invalid mesh[{}]: indices len={} (expected non-empty triangle list)",
                 mesh_index,
-                indices.len()
+                mesh.indices.len()
             )
             .into());
         }
 
-        let triangle_count = indices.len() / 3;
-        if material_ids.len() != triangle_count {
+        let triangle_count = mesh.indices.len() / 3;
+        if mesh.material_ids.len() != triangle_count {
             return Err(format!(
                 "Invalid mesh[{}]: material_ids len={} but triangles={}",
                 mesh_index,
-                material_ids.len(),
+                mesh.material_ids.len(),
                 triangle_count
+            )
+            .into());
+        }
+
+        if mesh.num_attributes > 0 && mesh.attribute_weights.len() != mesh.num_attributes as usize {
+            return Err(format!(
+                "Invalid mesh[{}]: attribute_weights len={} but num_attributes={}",
+                mesh_index,
+                mesh.attribute_weights.len(),
+                mesh.num_attributes
             )
             .into());
         }
@@ -203,10 +505,9 @@ pub fn handle_scene(args: &SceneArgs, verbose: bool) -> Result<(), Box<dyn std::
         .unwrap_or("")
         .to_lowercase();
 
-    let (mut mesh_data, scene_nodes, mesh_bindings) = match ext.as_str() {
-        "fbx" => load_fbx_scene(input_path, verbose)?,
+    let (mut mesh_data, scene_nodes, mesh_bindings, metadata) = match ext.as_str() {
         "glb" | "gltf" => load_glb_scene(input_path)?,
-        _ => return Err(format!("Unsupported scene input format: {}", ext).into()),
+        _ => return Err(format!("Unsupported scene input format: {} (only GLB/GLTF is supported)", ext).into()),
     };
 
     if verbose {
@@ -219,17 +520,22 @@ pub fn handle_scene(args: &SceneArgs, verbose: bool) -> Result<(), Box<dyn std::
     }
 
     let mut scene_meshes: Vec<QemSceneMeshView> = Vec::new();
-    for (i, (v, idx, mat)) in mesh_data.iter_mut().enumerate() {
+    for (i, mesh_data_item) in mesh_data.iter_mut().enumerate() {
+        let stride = mesh_stride(mesh_data_item.num_attributes);
         scene_meshes.push(QemSceneMeshView {
             mesh_id: i as u32,
             mesh: QemMeshView {
-                vertices: v.as_mut_ptr(),
-                num_vertices: (v.len() / 3) as u32,
-                indices: idx.as_mut_ptr(),
-                num_indices: idx.len() as u32,
-                material_ids: mat.as_mut_ptr(),
-                num_attributes: 0,
-                attribute_weights: std::ptr::null(),
+                vertices: mesh_data_item.vertices.as_mut_ptr(),
+                num_vertices: (mesh_data_item.vertices.len() / stride) as u32,
+                indices: mesh_data_item.indices.as_mut_ptr(),
+                num_indices: mesh_data_item.indices.len() as u32,
+                material_ids: mesh_data_item.material_ids.as_mut_ptr(),
+                num_attributes: mesh_data_item.num_attributes,
+                attribute_weights: if mesh_data_item.num_attributes == 0 {
+                    std::ptr::null()
+                } else {
+                    mesh_data_item.attribute_weights.as_ptr()
+                },
             },
         });
     }
@@ -261,7 +567,16 @@ pub fn handle_scene(args: &SceneArgs, verbose: bool) -> Result<(), Box<dyn std::
         max_mesh_ratio: args.max_mesh_ratio,
         weight_mode: args.weight_mode,
         use_world_scale: if args.use_world_scale { 1 } else { 0 },
+        enable_parallel: if args.enable_parallel { 1 } else { 0 },
+        max_parallel_tasks: args.max_parallel_tasks,
         ..Default::default()
+    };
+
+    let execution_options = QemSceneExecutionOptions {
+        enable_parallel: if args.enable_parallel { 1 } else { 0 },
+        max_parallel_tasks: args.max_parallel_tasks,
+        retry_count: 1,
+        fallback_relaxation_step: 0.15,
     };
 
     let base_options = QemSimplifyOptions {
@@ -329,16 +644,20 @@ pub fn handle_scene(args: &SceneArgs, verbose: bool) -> Result<(), Box<dyn std::
     let progress = CliProgressGuard::attach(context, CliProgressScope::Scene, "场景简化")?;
 
     if verbose {
-        println!("Starting scene simplification...");
+        println!(
+            "Starting scene simplification... parallel={}, max_parallel_tasks={}",
+            args.enable_parallel, args.max_parallel_tasks
+        );
     }
 
     let mut mesh_results = vec![QemSceneMeshResult::default(); scene_meshes.len()];
     let status = unsafe {
-        qem_scene_graph_simplify(
+        qem_scene_graph_simplify_ex(
             context,
             &mut scene_graph,
             &policy,
             &base_options,
+            &execution_options,
             decisions.as_mut_ptr(),
             decisions.len() as u32,
             &mut decision_count,
@@ -367,6 +686,16 @@ pub fn handle_scene(args: &SceneArgs, verbose: bool) -> Result<(), Box<dyn std::
         .into());
     }
 
+    for (mesh_view, mesh_data_item) in scene_meshes.iter().zip(mesh_data.iter_mut()) {
+        let stride = mesh_stride(mesh_data_item.num_attributes);
+        let output_vertices = mesh_view.mesh.num_vertices as usize;
+        let output_indices = mesh_view.mesh.num_indices as usize;
+
+        mesh_data_item.vertices.truncate(output_vertices * stride);
+        mesh_data_item.indices.truncate(output_indices);
+        mesh_data_item.material_ids.truncate(output_indices / 3);
+    }
+
     if verbose {
         let decision_len = (decision_count as usize).min(decisions.len());
         print_scene_simplification_preview(
@@ -383,7 +712,13 @@ pub fn handle_scene(args: &SceneArgs, verbose: bool) -> Result<(), Box<dyn std::
         println!("  Output triangles: {}", scene_result.output_triangles);
     }
 
-    export_scene_to_glb(&args.output, &mesh_data, &scene_nodes, &mesh_bindings)?;
+    export_scene_to_glb(
+        &args.output,
+        &mesh_data,
+        &scene_nodes,
+        &mesh_bindings,
+        &metadata,
+    )?;
 
     Ok(())
 }
@@ -688,214 +1023,145 @@ fn print_scene_simplification_preview(
     println!();
 }
 
-fn load_fbx_scene(
-    path: &Path,
-    verbose: bool,
-) -> Result<
-    (
-        Vec<(Vec<f32>, Vec<u32>, Vec<i32>)>,
-        Vec<QemSceneGraphNodeView>,
-        Vec<QemSceneGraphMeshBindingView>,
-    ),
-    Box<dyn std::error::Error>,
-> {
-    let input_str = path.to_str().ok_or("Invalid input path")?;
-    let fbx_scene = load_fbx(input_str, FbxOpts::default())
-        .map_err(|e| format!("Failed to load FBX: {:?}", e))?;
-
-    let mut mesh_data = Vec::new();
-    let mut mesh_index_by_typed_id: HashMap<u32, i32> = HashMap::new();
-    let mut triangulated_faces = 0usize;
-    let mut skipped_faces_invalid_index = 0usize;
-    let mut skipped_meshes_empty_triangles = 0usize;
-
-    for fbx_mesh in &fbx_scene.meshes {
-        let vertices: Vec<f32> = fbx_mesh
-            .vertices
-            .iter()
-            .flat_map(|v| [v.x as f32, v.y as f32, v.z as f32])
-            .collect();
-
-        let mut indices = Vec::new();
-        for face in &fbx_mesh.faces {
-            if face.num_indices < 3 {
-                continue;
-            }
-
-            let mut face_indices = Vec::with_capacity(face.num_indices as usize);
-            let mut invalid_face = false;
-
-            for j in 0..face.num_indices {
-                let raw_idx = fbx_mesh.vertex_indices[(face.index_begin + j) as usize];
-                if (raw_idx as usize) >= fbx_mesh.vertices.len() {
-                    invalid_face = true;
-                    break;
-                }
-                face_indices.push(raw_idx as u32);
-            }
-
-            if invalid_face {
-                skipped_faces_invalid_index += 1;
-                continue;
-            }
-
-            if face_indices.len() == 3 {
-                indices.extend_from_slice(&face_indices);
-            } else {
-                for j in 1..(face_indices.len() - 1) {
-                    indices.push(face_indices[0]);
-                    indices.push(face_indices[j]);
-                    indices.push(face_indices[j + 1]);
-                }
-                triangulated_faces += 1;
-            }
-        }
-
-        if indices.is_empty() {
-            skipped_meshes_empty_triangles += 1;
-            continue;
-        }
-
-        let material_ids = vec![0i32; indices.len() / 3];
-        let simplified_mesh_index = mesh_data.len() as i32;
-        mesh_data.push((vertices, indices, material_ids));
-        mesh_index_by_typed_id.insert(fbx_mesh.element.typed_id as u32, simplified_mesh_index);
-    }
-
-    if verbose {
-        println!(
-            "FBX import diagnostics: source_meshes={}, kept_meshes={}, skipped_empty={}, triangulated_faces={}, skipped_invalid_faces={}",
-            fbx_scene.meshes.len(),
-            mesh_data.len(),
-            skipped_meshes_empty_triangles,
-            triangulated_faces,
-            skipped_faces_invalid_index
-        );
-    }
-
-    let mut node_index_by_typed_id: HashMap<u32, i32> = HashMap::new();
-    for (node_index, fbx_node) in fbx_scene.nodes.iter().enumerate() {
-        node_index_by_typed_id.insert(fbx_node.element.typed_id as u32, node_index as i32);
-    }
-
-    let mut scene_nodes = Vec::new();
-    let mut mesh_bindings = Vec::new();
-
-    let mut world_mats = Vec::new();
-    for fbx_node in &fbx_scene.nodes {
-        let m = &fbx_node.node_to_world;
-        world_mats.push(Mat4::from_cols_array(&[
-            m.m00 as f32,
-            m.m10 as f32,
-            m.m20 as f32,
-            0.0,
-            m.m01 as f32,
-            m.m11 as f32,
-            m.m21 as f32,
-            0.0,
-            m.m02 as f32,
-            m.m12 as f32,
-            m.m22 as f32,
-            0.0,
-            m.m03 as f32,
-            m.m13 as f32,
-            m.m23 as f32,
-            1.0,
-        ]));
-    }
-
-    for (node_index, fbx_node) in fbx_scene.nodes.iter().enumerate() {
-        let parent_index = fbx_node
-            .parent
-            .as_ref()
-            .and_then(|parent| {
-                node_index_by_typed_id
-                    .get(&(parent.element.typed_id as u32))
-                    .copied()
-            })
-            .unwrap_or(-1);
-
-        let mesh_index = fbx_node
-            .mesh
-            .as_ref()
-            .and_then(|fbx_mesh| {
-                mesh_index_by_typed_id
-                    .get(&(fbx_mesh.element.typed_id as u32))
-                    .copied()
-            })
-            .unwrap_or(-1);
-
-        let world = world_mats[node_index];
-        let local = if parent_index >= 0 && (parent_index as usize) < world_mats.len() {
-            let parent_world = world_mats[parent_index as usize];
-            if parent_world.determinant().abs() > 1.0e-8 {
-                parent_world.inverse() * world
-            } else {
-                world
-            }
-        } else {
-            world
-        };
-
-        scene_nodes.push(QemSceneGraphNodeView {
-            parent_index,
-            local_matrix: local.to_cols_array(),
-        });
-
-        if mesh_index >= 0 {
-            mesh_bindings.push(QemSceneGraphMeshBindingView {
-                node_index: node_index as u32,
-                mesh_index: mesh_index as u32,
-                mesh_to_node_matrix: [
-                    1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0,
-                    1.0,
-                ],
-                use_mesh_to_node_matrix: 0,
-            });
-        }
-    }
-
-    Ok((mesh_data, scene_nodes, mesh_bindings))
-}
-
 fn load_glb_scene(
     path: &Path,
 ) -> Result<
     (
-        Vec<(Vec<f32>, Vec<u32>, Vec<i32>)>,
+        Vec<SceneMeshData>,
         Vec<QemSceneGraphNodeView>,
         Vec<QemSceneGraphMeshBindingView>,
+        SceneExportMetadata,
     ),
     Box<dyn std::error::Error>,
 > {
     let (document, buffers, _) = gltf::import(path)?;
 
+    let mut metadata = SceneExportMetadata::default();
+    for material in document.materials() {
+        metadata
+            .material_descriptors
+            .push(material_descriptor_from_gltf(&material));
+    }
+
+    for image in document.images() {
+        let descriptor = match image.source() {
+            gltf::image::Source::View { view, mime_type } => {
+                let buffer = &buffers[view.buffer().index()];
+                let start = view.offset();
+                let end = start.saturating_add(view.length()).min(buffer.len());
+                let data = if end > start {
+                    Some(buffer[start..end].to_vec())
+                } else {
+                    None
+                };
+
+                ImageDescriptor {
+                    mime_type: Some(mime_type.to_string()),
+                    uri: None,
+                    data,
+                }
+            }
+            gltf::image::Source::Uri { uri, mime_type } => ImageDescriptor {
+                mime_type: mime_type.map(|m| m.to_string()),
+                uri: Some(uri.to_string()),
+                data: None,
+            },
+        };
+
+        metadata.image_descriptors.push(descriptor);
+    }
+
+    for sampler in document.samplers() {
+        metadata.sampler_descriptors.push(SamplerDescriptor {
+            mag_filter: sampler.mag_filter(),
+            min_filter: sampler.min_filter(),
+            wrap_s: sampler.wrap_s(),
+            wrap_t: sampler.wrap_t(),
+        });
+    }
+
+    for texture in document.textures() {
+        metadata.texture_descriptors.push(TextureDescriptor {
+            source_image_index: texture.source().index(),
+            sampler_index: texture.sampler().index(),
+        });
+    }
+
+    let mut default_material_id: Option<i32> = None;
+
     let mut mesh_data = Vec::new();
     for mesh in document.meshes() {
         let mut all_v = Vec::new();
         let mut all_i = Vec::new();
+        let mut all_material_ids = Vec::new();
 
         for primitive in mesh.primitives() {
             let reader = primitive.reader(|buffer| Some(&buffers[buffer.index()]));
-            let positions: Vec<f32> = reader
-                .read_positions()
-                .ok_or("No positions")?
-                .flatten()
-                .collect();
+            let positions: Vec<[f32; 3]> = reader.read_positions().ok_or("No positions")?.collect();
             let indices: Vec<u32> = reader
                 .read_indices()
                 .ok_or("No indices")?
                 .into_u32()
                 .collect();
 
-            let offset = (all_v.len() / 3) as u32;
-            all_v.extend(positions);
+            let normals = reader.read_normals().map(|iter| iter.collect::<Vec<[f32; 3]>>());
+            let texcoords = reader
+                .read_tex_coords(0)
+                .map(|iter| iter.into_f32().collect::<Vec<[f32; 2]>>());
+            let colors = reader
+                .read_colors(0)
+                .map(|iter| iter.into_rgba_f32().collect::<Vec<[f32; 4]>>());
+
+            let offset = (all_v.len() / mesh_stride(SCENE_NUM_ATTRIBUTES)) as u32;
+            for (vertex_index, position) in positions.iter().enumerate() {
+                let normal = normals
+                    .as_ref()
+                    .and_then(|n| n.get(vertex_index).copied())
+                    .unwrap_or([0.0, 0.0, 1.0]);
+                let uv = texcoords
+                    .as_ref()
+                    .and_then(|uv| uv.get(vertex_index).copied())
+                    .unwrap_or([0.0, 0.0]);
+                let color = colors
+                    .as_ref()
+                    .and_then(|c| c.get(vertex_index).copied())
+                    .unwrap_or([1.0, 1.0, 1.0, 1.0]);
+
+                all_v.extend_from_slice(position);
+                all_v.extend_from_slice(&normal);
+                all_v.extend_from_slice(&uv);
+                all_v.extend_from_slice(&color);
+            }
+
+            let material_id = if let Some(index) = primitive.material().index() {
+                index as i32
+            } else {
+                *default_material_id.get_or_insert_with(|| {
+                    ensure_material_descriptor(
+                        &mut metadata.material_descriptors,
+                        default_material_descriptor("default_material".to_string()),
+                    )
+                })
+            };
+            let tri_count = indices.len() / 3;
+
             for idx in indices {
                 all_i.push(idx + offset);
             }
+
+            for _ in 0..tri_count {
+                all_material_ids.push(material_id);
+            }
         }
-        let material_ids = vec![0i32; all_i.len() / 3];
-        mesh_data.push((all_v, all_i, material_ids));
+
+        mesh_data.push(SceneMeshData {
+            name: mesh.name().map(|s| s.to_string()),
+            vertices: all_v,
+            indices: all_i,
+            material_ids: all_material_ids,
+            num_attributes: SCENE_NUM_ATTRIBUTES,
+            attribute_weights: default_attribute_weights(SCENE_NUM_ATTRIBUTES),
+        });
     }
 
     let mut scene_nodes = Vec::new();
@@ -903,11 +1169,17 @@ fn load_glb_scene(
 
     for scene in document.scenes() {
         for node in scene.nodes() {
-            process_gltf_node(&node, -1, &mut scene_nodes, &mut mesh_bindings);
+            process_gltf_node(
+                &node,
+                -1,
+                &mut scene_nodes,
+                &mut mesh_bindings,
+                &mut metadata.node_names,
+            );
         }
     }
 
-    Ok((mesh_data, scene_nodes, mesh_bindings))
+    Ok((mesh_data, scene_nodes, mesh_bindings, metadata))
 }
 
 fn process_gltf_node(
@@ -915,6 +1187,7 @@ fn process_gltf_node(
     parent_index: i32,
     scene_nodes: &mut Vec<QemSceneGraphNodeView>,
     mesh_bindings: &mut Vec<QemSceneGraphMeshBindingView>,
+    node_names: &mut Vec<Option<String>>,
 ) {
     let local_arr = node.transform().matrix();
     let mut local_matrix = [0.0f32; 16];
@@ -931,6 +1204,8 @@ fn process_gltf_node(
         local_matrix,
     });
 
+    node_names.push(node.name().map(|s| s.to_string()));
+
     if let Some(mesh) = node.mesh() {
         mesh_bindings.push(QemSceneGraphMeshBindingView {
             node_index,
@@ -943,42 +1218,239 @@ fn process_gltf_node(
     }
 
     for child in node.children() {
-        process_gltf_node(&child, node_index as i32, scene_nodes, mesh_bindings);
+        process_gltf_node(
+            &child,
+            node_index as i32,
+            scene_nodes,
+            mesh_bindings,
+            node_names,
+        );
     }
 }
 
 fn export_scene_to_glb(
     path: &str,
-    mesh_data: &[(Vec<f32>, Vec<u32>, Vec<i32>)],
+    mesh_data: &[SceneMeshData],
     nodes: &[QemSceneGraphNodeView],
     mesh_bindings: &[QemSceneGraphMeshBindingView],
+    metadata: &SceneExportMetadata,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use gltf_json as json;
     use json::validation::Checked::Valid;
+    use std::collections::BTreeMap;
     use std::fs::File;
     use std::io::Write;
 
     let mut root = json::Root::default();
     let mut buffer_data = Vec::new();
 
+    let mut image_index_map: Vec<Option<json::Index<json::Image>>> =
+        vec![None; metadata.image_descriptors.len()];
+    for (image_slot, image_descriptor) in metadata.image_descriptors.iter().enumerate() {
+        let image_index = if let Some(data) = &image_descriptor.data {
+            if data.is_empty() {
+                None
+            } else {
+                let image_offset = buffer_data.len();
+                buffer_data.extend_from_slice(data);
+                let image_offset_aligned = image_offset as u64;
+
+                let image_buffer_view = root.push(json::buffer::View {
+                    buffer: json::Index::new(0),
+                    byte_length: json::validation::USize64(data.len() as u64),
+                    byte_offset: Some(json::validation::USize64(image_offset_aligned)),
+                    byte_stride: None,
+                    extensions: Default::default(),
+                    extras: Default::default(),
+                    name: None,
+                    target: None,
+                });
+
+                Some(root.push(json::Image {
+                    buffer_view: Some(image_buffer_view),
+                    mime_type: image_descriptor
+                        .mime_type
+                        .as_ref()
+                        .map(|mime| json::image::MimeType(mime.clone())),
+                    name: None,
+                    uri: None,
+                    extensions: Default::default(),
+                    extras: Default::default(),
+                }))
+            }
+        } else {
+            image_descriptor.uri.as_ref().map(|uri| {
+                root.push(json::Image {
+                    buffer_view: None,
+                    mime_type: image_descriptor
+                        .mime_type
+                        .as_ref()
+                        .map(|mime| json::image::MimeType(mime.clone())),
+                    name: None,
+                    uri: Some(uri.clone()),
+                    extensions: Default::default(),
+                    extras: Default::default(),
+                })
+            })
+        };
+
+        image_index_map[image_slot] = image_index;
+    }
+
+    let mut sampler_index_map: Vec<Option<json::Index<json::texture::Sampler>>> =
+        vec![None; metadata.sampler_descriptors.len()];
+    for (sampler_slot, sampler_descriptor) in metadata.sampler_descriptors.iter().enumerate() {
+        let sampler_index = root.push(json::texture::Sampler {
+            mag_filter: sampler_descriptor.mag_filter.map(Valid),
+            min_filter: sampler_descriptor.min_filter.map(Valid),
+            name: None,
+            wrap_s: Valid(sampler_descriptor.wrap_s),
+            wrap_t: Valid(sampler_descriptor.wrap_t),
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        sampler_index_map[sampler_slot] = Some(sampler_index);
+    }
+
+    let mut texture_index_map: Vec<Option<json::Index<json::Texture>>> =
+        vec![None; metadata.texture_descriptors.len()];
+    for (texture_slot, texture_descriptor) in metadata.texture_descriptors.iter().enumerate() {
+        let source_image = image_index_map
+            .get(texture_descriptor.source_image_index)
+            .and_then(|image| *image);
+
+        let Some(source_image) = source_image else {
+            continue;
+        };
+
+        let sampler_index = texture_descriptor
+            .sampler_index
+            .and_then(|sampler_slot| sampler_index_map.get(sampler_slot).and_then(|s| *s));
+
+        let texture_index = root.push(json::Texture {
+            name: None,
+            sampler: sampler_index,
+            source: source_image,
+            extensions: Default::default(),
+            extras: Default::default(),
+        });
+
+        texture_index_map[texture_slot] = Some(texture_index);
+    }
+
     let mut mesh_indices_in_gltf = Vec::new();
 
-    for (vertices, indices, _) in mesh_data {
-        let v_offset = buffer_data.len();
-        for &v in vertices {
-            buffer_data.extend_from_slice(&v.to_le_bytes());
+    let mut material_index_map: BTreeMap<i32, json::Index<json::Material>> = BTreeMap::new();
+
+    for mesh in mesh_data {
+        let mesh_stride = mesh_stride(mesh.num_attributes);
+        let vertex_count = mesh.vertices.len() / mesh_stride;
+
+        let mut positions = Vec::with_capacity(vertex_count * 3);
+        let mut normals = if mesh.num_attributes >= 3 {
+            Some(Vec::with_capacity(vertex_count * 3))
+        } else {
+            None
+        };
+        let mut texcoords = if mesh.num_attributes >= 5 {
+            Some(Vec::with_capacity(vertex_count * 2))
+        } else {
+            None
+        };
+        let mut colors = if mesh.num_attributes >= 9 {
+            Some(Vec::with_capacity(vertex_count * 4))
+        } else {
+            None
+        };
+
+        for vertex_index in 0..vertex_count {
+            let base = vertex_index * mesh_stride;
+            positions.extend_from_slice(&mesh.vertices[base..base + 3]);
+            if let Some(normals) = &mut normals {
+                normals.extend_from_slice(&mesh.vertices[base + 3..base + 6]);
+            }
+            if let Some(texcoords) = &mut texcoords {
+                texcoords.extend_from_slice(&mesh.vertices[base + 6..base + 8]);
+            }
+            if let Some(colors) = &mut colors {
+                colors.extend_from_slice(&mesh.vertices[base + 8..base + 12]);
+            }
         }
-        let i_offset = buffer_data.len();
-        for &idx in indices {
-            buffer_data.extend_from_slice(&idx.to_le_bytes());
+
+        let mut positions_bytes = Vec::with_capacity(positions.len() * std::mem::size_of::<f32>());
+        for &v in &positions {
+            positions_bytes.extend_from_slice(&v.to_le_bytes());
+        }
+
+        let mut normals_bytes = Vec::new();
+        if let Some(normals) = &normals {
+            normals_bytes.reserve(normals.len() * std::mem::size_of::<f32>());
+            for &v in normals {
+                normals_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        let mut texcoords_bytes = Vec::new();
+        if let Some(texcoords) = &texcoords {
+            texcoords_bytes.reserve(texcoords.len() * std::mem::size_of::<f32>());
+            for &v in texcoords {
+                texcoords_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        let mut colors_bytes = Vec::new();
+        if let Some(colors) = &colors {
+            colors_bytes.reserve(colors.len() * std::mem::size_of::<f32>());
+            for &v in colors {
+                colors_bytes.extend_from_slice(&v.to_le_bytes());
+            }
+        }
+
+        let positions_offset = buffer_data.len();
+        buffer_data.extend_from_slice(&positions_bytes);
+
+        let normals_offset = if !normals_bytes.is_empty() {
+            let offset = buffer_data.len();
+            buffer_data.extend_from_slice(&normals_bytes);
+            Some(offset)
+        } else {
+            None
+        };
+
+        let texcoords_offset = if !texcoords_bytes.is_empty() {
+            let offset = buffer_data.len();
+            buffer_data.extend_from_slice(&texcoords_bytes);
+            Some(offset)
+        } else {
+            None
+        };
+
+        let colors_offset = if !colors_bytes.is_empty() {
+            let offset = buffer_data.len();
+            buffer_data.extend_from_slice(&colors_bytes);
+            Some(offset)
+        } else {
+            None
+        };
+
+        let mut per_material_indices: BTreeMap<i32, Vec<u32>> = BTreeMap::new();
+        let triangle_count = mesh.indices.len() / 3;
+        for tri in 0..triangle_count {
+            let material_id = mesh.material_ids.get(tri).copied().unwrap_or(0).max(0);
+            let tri_start = tri * 3;
+            per_material_indices
+                .entry(material_id)
+                .or_default()
+                .extend_from_slice(&mesh.indices[tri_start..tri_start + 3]);
         }
 
         let buffer_idx = 0;
 
         let v_bv = root.push(json::buffer::View {
             buffer: json::Index::new(buffer_idx),
-            byte_length: json::validation::USize64((i_offset - v_offset) as u64),
-            byte_offset: Some(json::validation::USize64(v_offset as u64)),
+            byte_length: json::validation::USize64(positions_bytes.len() as u64),
+            byte_offset: Some(json::validation::USize64(positions_offset as u64)),
             byte_stride: Some(json::buffer::Stride(12)),
             extensions: Default::default(),
             extras: Default::default(),
@@ -986,21 +1458,10 @@ fn export_scene_to_glb(
             target: Some(Valid(json::buffer::Target::ArrayBuffer)),
         });
 
-        let i_bv = root.push(json::buffer::View {
-            buffer: json::Index::new(buffer_idx),
-            byte_length: json::validation::USize64((buffer_data.len() - i_offset) as u64),
-            byte_offset: Some(json::validation::USize64(i_offset as u64)),
-            byte_stride: None,
-            extensions: Default::default(),
-            extras: Default::default(),
-            name: None,
-            target: Some(Valid(json::buffer::Target::ElementArrayBuffer)),
-        });
-
         let pos_acc = root.push(json::Accessor {
             buffer_view: Some(v_bv),
             byte_offset: Some(json::validation::USize64(0)),
-            count: json::validation::USize64((vertices.len() / 3) as u64),
+            count: json::validation::USize64(vertex_count as u64),
             component_type: Valid(json::accessor::GenericComponentType(
                 json::accessor::ComponentType::F32,
             )),
@@ -1014,42 +1475,177 @@ fn export_scene_to_glb(
             sparse: None,
         });
 
-        let idx_acc = root.push(json::Accessor {
-            buffer_view: Some(i_bv),
-            byte_offset: Some(json::validation::USize64(0)),
-            count: json::validation::USize64(indices.len() as u64),
-            component_type: Valid(json::accessor::GenericComponentType(
-                json::accessor::ComponentType::U32,
-            )),
-            extensions: Default::default(),
-            extras: Default::default(),
-            type_: Valid(json::accessor::Type::Scalar),
-            min: None,
-            max: None,
-            name: None,
-            normalized: false,
-            sparse: None,
-        });
+        let normals_accessor = if let Some(normals_offset) = normals_offset {
+            let normals_bv = root.push(json::buffer::View {
+                buffer: json::Index::new(buffer_idx),
+                byte_length: json::validation::USize64(normals_bytes.len() as u64),
+                byte_offset: Some(json::validation::USize64(normals_offset as u64)),
+                byte_stride: Some(json::buffer::Stride(12)),
+                extensions: Default::default(),
+                extras: Default::default(),
+                name: None,
+                target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            });
 
-        let primitive = json::mesh::Primitive {
-            attributes: {
-                let mut map = std::collections::BTreeMap::new();
-                map.insert(Valid(json::mesh::Semantic::Positions), pos_acc);
-                map
-            },
-            extensions: Default::default(),
-            extras: Default::default(),
-            indices: Some(idx_acc),
-            material: None,
-            mode: Valid(json::mesh::Mode::Triangles),
-            targets: None,
+            Some(root.push(json::Accessor {
+                buffer_view: Some(normals_bv),
+                byte_offset: Some(json::validation::USize64(0)),
+                count: json::validation::USize64(vertex_count as u64),
+                component_type: Valid(json::accessor::GenericComponentType(
+                    json::accessor::ComponentType::F32,
+                )),
+                extensions: Default::default(),
+                extras: Default::default(),
+                type_: Valid(json::accessor::Type::Vec3),
+                min: None,
+                max: None,
+                name: None,
+                normalized: false,
+                sparse: None,
+            }))
+        } else {
+            None
         };
+
+        let texcoords_accessor = if let Some(texcoords_offset) = texcoords_offset {
+            let texcoords_bv = root.push(json::buffer::View {
+                buffer: json::Index::new(buffer_idx),
+                byte_length: json::validation::USize64(texcoords_bytes.len() as u64),
+                byte_offset: Some(json::validation::USize64(texcoords_offset as u64)),
+                byte_stride: Some(json::buffer::Stride(8)),
+                extensions: Default::default(),
+                extras: Default::default(),
+                name: None,
+                target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            });
+
+            Some(root.push(json::Accessor {
+                buffer_view: Some(texcoords_bv),
+                byte_offset: Some(json::validation::USize64(0)),
+                count: json::validation::USize64(vertex_count as u64),
+                component_type: Valid(json::accessor::GenericComponentType(
+                    json::accessor::ComponentType::F32,
+                )),
+                extensions: Default::default(),
+                extras: Default::default(),
+                type_: Valid(json::accessor::Type::Vec2),
+                min: None,
+                max: None,
+                name: None,
+                normalized: false,
+                sparse: None,
+            }))
+        } else {
+            None
+        };
+
+        let colors_accessor = if let Some(colors_offset) = colors_offset {
+            let colors_bv = root.push(json::buffer::View {
+                buffer: json::Index::new(buffer_idx),
+                byte_length: json::validation::USize64(colors_bytes.len() as u64),
+                byte_offset: Some(json::validation::USize64(colors_offset as u64)),
+                byte_stride: Some(json::buffer::Stride(16)),
+                extensions: Default::default(),
+                extras: Default::default(),
+                name: None,
+                target: Some(Valid(json::buffer::Target::ArrayBuffer)),
+            });
+
+            Some(root.push(json::Accessor {
+                buffer_view: Some(colors_bv),
+                byte_offset: Some(json::validation::USize64(0)),
+                count: json::validation::USize64(vertex_count as u64),
+                component_type: Valid(json::accessor::GenericComponentType(
+                    json::accessor::ComponentType::F32,
+                )),
+                extensions: Default::default(),
+                extras: Default::default(),
+                type_: Valid(json::accessor::Type::Vec4),
+                min: None,
+                max: None,
+                name: None,
+                normalized: false,
+                sparse: None,
+            }))
+        } else {
+            None
+        };
+
+        let mut primitives = Vec::new();
+        for (material_id, mat_indices) in per_material_indices {
+            let index_offset = buffer_data.len();
+            for idx in &mat_indices {
+                buffer_data.extend_from_slice(&idx.to_le_bytes());
+            }
+
+            let material_index = *material_index_map.entry(material_id).or_insert_with(|| {
+                let descriptor = metadata
+                    .material_descriptors
+                    .get(material_id as usize)
+                    .cloned()
+                    .unwrap_or_else(|| default_material_descriptor(format!("material_{}", material_id)));
+                root.push(build_json_material(&descriptor, &texture_index_map))
+            });
+
+            let i_bv = root.push(json::buffer::View {
+                buffer: json::Index::new(buffer_idx),
+                byte_length: json::validation::USize64((mat_indices.len() * std::mem::size_of::<u32>()) as u64),
+                byte_offset: Some(json::validation::USize64(index_offset as u64)),
+                byte_stride: None,
+                extensions: Default::default(),
+                extras: Default::default(),
+                name: None,
+                target: Some(Valid(json::buffer::Target::ElementArrayBuffer)),
+            });
+
+            let idx_acc = root.push(json::Accessor {
+                buffer_view: Some(i_bv),
+                byte_offset: Some(json::validation::USize64(0)),
+                count: json::validation::USize64(mat_indices.len() as u64),
+                component_type: Valid(json::accessor::GenericComponentType(
+                    json::accessor::ComponentType::U32,
+                )),
+                extensions: Default::default(),
+                extras: Default::default(),
+                type_: Valid(json::accessor::Type::Scalar),
+                min: None,
+                max: None,
+                name: None,
+                normalized: false,
+                sparse: None,
+            });
+
+            let mut attributes = std::collections::BTreeMap::new();
+            attributes.insert(Valid(json::mesh::Semantic::Positions), pos_acc);
+            if let Some(normals_accessor) = normals_accessor {
+                attributes.insert(Valid(json::mesh::Semantic::Normals), normals_accessor);
+            }
+            if let Some(texcoords_accessor) = texcoords_accessor {
+                attributes.insert(
+                    Valid(json::mesh::Semantic::TexCoords(0)),
+                    texcoords_accessor,
+                );
+            }
+            if let Some(colors_accessor) = colors_accessor {
+                attributes.insert(Valid(json::mesh::Semantic::Colors(0)), colors_accessor);
+            }
+
+            primitives.push(json::mesh::Primitive {
+                attributes,
+                extensions: Default::default(),
+                extras: Default::default(),
+                indices: Some(idx_acc),
+                material: Some(material_index),
+                mode: Valid(json::mesh::Mode::Triangles),
+                targets: None,
+            });
+        }
 
         let mesh = root.push(json::Mesh {
             extensions: Default::default(),
             extras: Default::default(),
-            name: None,
-            primitives: vec![primitive],
+            name: mesh.name.clone(),
+            primitives,
             weights: None,
         });
 
@@ -1068,6 +1664,11 @@ fn export_scene_to_glb(
     for node in nodes {
         gltf_nodes.push(root.push(json::Node {
             mesh: None,
+            name: metadata
+                .node_names
+                .get(gltf_nodes.len())
+                .cloned()
+                .unwrap_or(None),
             matrix: Some(node.local_matrix),
             ..Default::default()
         }));

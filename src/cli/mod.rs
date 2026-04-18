@@ -1,5 +1,5 @@
 use crate::{register_log_callback, QemSimplifyOptions};
-use clap::{Parser, Subcommand};
+use clap::{ArgAction, Parser, Subcommand};
 use std::ffi::CStr;
 use std::os::raw::c_char;
 
@@ -53,7 +53,7 @@ pub struct Cli {
 pub enum Commands {
     /// Simplify a single mesh model (OBJ, GLB)
     Model(ModelArgs),
-    /// Simplify a scene with multiple meshes and instances (FBX)
+    /// Simplify a scene with multiple meshes and instances (GLB/GLTF)
     Scene(SceneArgs),
 }
 
@@ -129,7 +129,7 @@ impl ModelArgs {
 
 #[derive(Parser, Debug)]
 pub struct SceneArgs {
-    /// Input scene file (FBX or GLB)
+    /// Input scene file (GLB/GLTF)
     #[arg(short, long)]
     pub input: String,
 
@@ -156,6 +156,14 @@ pub struct SceneArgs {
     /// Use world scale for importance weighting.
     #[arg(long, default_value_t = true)]
     pub use_world_scale: bool,
+
+    /// Enable parallel mesh simplification execution.
+    #[arg(long, default_value_t = true, action = ArgAction::Set)]
+    pub enable_parallel: bool,
+
+    /// Max parallel tasks (0 = auto thread pool sizing).
+    #[arg(long, default_value_t = 0)]
+    pub max_parallel_tasks: u32,
 
     /// Only compute and preview scene simplification decisions without applying simplification.
     #[arg(long, default_value_t = false)]

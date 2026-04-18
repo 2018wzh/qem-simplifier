@@ -11,6 +11,7 @@ use std::ffi::{c_char, c_void};
 use std::fmt::Write as _;
 use std::ptr;
 use std::slice;
+use std::sync::atomic::{AtomicU32, Ordering};
 
 pub const QEM_SCENE_WEIGHT_UNIFORM: u32 = 0;
 pub const QEM_SCENE_WEIGHT_MESH_VOLUME: u32 = 1;
@@ -1565,8 +1566,11 @@ pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
 
     let base_options_value = unsafe { *base_options };
     let run_parallel = execution.enable_parallel != 0 && meshes.len() > 1;
+    let progress_context_addr = context as usize;
 
     let mut mesh_results: Vec<QemSceneMeshResult> = if run_parallel {
+        let completed_count = AtomicU32::new(0);
+
         let mut collect_parallel = || {
             meshes
                 .par_iter_mut()
@@ -1591,7 +1595,7 @@ pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
                         source_tri
                     };
 
-                    QemSceneMeshResult {
+                    let mesh_result = QemSceneMeshResult {
                         mesh_index: mesh_index as u32,
                         mesh_id: scene_mesh.mesh_id,
                         status,
@@ -1599,7 +1603,25 @@ pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
                         requested_triangles: requested_used,
                         output_triangles: output_tri,
                         max_error: simplify_result.max_error,
-                    }
+                    };
+
+                    let completed = completed_count.fetch_add(1, Ordering::SeqCst) + 1;
+                    report_progress_event(
+                        progress_context_addr as *mut c_void,
+                        QemProgressEvent {
+                            scope: QEM_PROGRESS_SCOPE_SCENE,
+                            stage: QEM_PROGRESS_STAGE_UPDATE,
+                            percent: (completed as f32) / (mesh_count as f32),
+                            mesh_index: mesh_result.mesh_index,
+                            mesh_count,
+                            source_triangles: mesh_result.source_triangles,
+                            target_triangles: mesh_result.requested_triangles,
+                            output_triangles: mesh_result.output_triangles,
+                            status: mesh_result.status,
+                        },
+                    );
+
+                    mesh_result
                 })
                 .collect::<Vec<_>>()
         };
@@ -1661,27 +1683,28 @@ pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
         target_triangles += result.requested_triangles as u64;
         output_triangles += result.output_triangles as u64;
 
-        if result.status == QEM_STATUS_SUCCESS && result.output_triangles < result.source_triangles
-        {
+        if result.status == QEM_STATUS_SUCCESS && result.output_triangles < result.source_triangles {
             num_simplified_meshes += 1;
         } else if result.status != QEM_STATUS_SUCCESS && first_error == QEM_STATUS_SUCCESS {
             first_error = result.status;
         }
 
-        report_progress_event(
-            context,
-            QemProgressEvent {
-                scope: QEM_PROGRESS_SCOPE_SCENE,
-                stage: QEM_PROGRESS_STAGE_UPDATE,
-                percent: (mesh_index as f32 + 1.0) / (mesh_count as f32),
-                mesh_index: mesh_index as u32,
-                mesh_count,
-                source_triangles: result.source_triangles,
-                target_triangles: result.requested_triangles,
-                output_triangles: result.output_triangles,
-                status: result.status,
-            },
-        );
+        if !run_parallel {
+            report_progress_event(
+                context,
+                QemProgressEvent {
+                    scope: QEM_PROGRESS_SCOPE_SCENE,
+                    stage: QEM_PROGRESS_STAGE_UPDATE,
+                    percent: (mesh_index as f32 + 1.0) / (mesh_count as f32),
+                    mesh_index: result.mesh_index,
+                    mesh_count,
+                    source_triangles: result.source_triangles,
+                    target_triangles: result.requested_triangles,
+                    output_triangles: result.output_triangles,
+                    status: result.status,
+                },
+            );
+        }
     }
 
     if !out_mesh_results.is_null() {

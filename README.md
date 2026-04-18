@@ -199,16 +199,16 @@ cargo run --release -- --help
 cargo run --release -- model -i ./data/input.obj -o ./data/output.obj -r 0.5
 ```
 
-场景图简化（FBX/GLB 输入，GLB 输出）：
+场景图简化（GLB/GLTF 输入，GLB 输出）：
 
 ```bash
-cargo run --release -- scene -i ./data/Demo.FBX -o ./data/demo.glb -r 0.5
+cargo run --release -- scene -i ./data/Demo.glb -o ./data/demo.out.glb -r 0.5
 ```
 
 开启详细日志：
 
 ```bash
-cargo run --release -- -v scene -i ./data/Demo.FBX -o ./data/demo.glb -r 0.5 --dry-run
+cargo run --release -- -v scene -i ./data/Demo.glb -o ./data/demo.out.glb -r 0.5 --dry-run
 ```
 
 ---
