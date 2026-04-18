@@ -154,29 +154,35 @@ fn material_descriptor_from_gltf(material: &gltf::Material<'_>) -> MaterialDescr
     });
 
     let metallic_roughness_texture =
-        pbr.metallic_roughness_texture().map(|info| TextureInfoDescriptor {
+        pbr.metallic_roughness_texture()
+            .map(|info| TextureInfoDescriptor {
+                texture_index: info.texture().index(),
+                tex_coord: info.tex_coord(),
+            });
+
+    let normal_texture = material
+        .normal_texture()
+        .map(|normal| NormalTextureDescriptor {
+            texture_index: normal.texture().index(),
+            tex_coord: normal.tex_coord(),
+            scale: normal.scale(),
+        });
+
+    let occlusion_texture =
+        material
+            .occlusion_texture()
+            .map(|occlusion| OcclusionTextureDescriptor {
+                texture_index: occlusion.texture().index(),
+                tex_coord: occlusion.tex_coord(),
+                strength: occlusion.strength(),
+            });
+
+    let emissive_texture = material
+        .emissive_texture()
+        .map(|info| TextureInfoDescriptor {
             texture_index: info.texture().index(),
             tex_coord: info.tex_coord(),
         });
-
-    let normal_texture = material.normal_texture().map(|normal| NormalTextureDescriptor {
-        texture_index: normal.texture().index(),
-        tex_coord: normal.tex_coord(),
-        scale: normal.scale(),
-    });
-
-    let occlusion_texture = material
-        .occlusion_texture()
-        .map(|occlusion| OcclusionTextureDescriptor {
-            texture_index: occlusion.texture().index(),
-            tex_coord: occlusion.tex_coord(),
-            strength: occlusion.strength(),
-        });
-
-    let emissive_texture = material.emissive_texture().map(|info| TextureInfoDescriptor {
-        texture_index: info.texture().index(),
-        tex_coord: info.tex_coord(),
-    });
 
     MaterialDescriptor {
         name: material
@@ -339,7 +345,10 @@ pub fn handle_model(args: &ModelArgs, _verbose: bool) -> Result<(), Box<dyn std:
     Ok(())
 }
 
-fn simplify_mesh(mesh_data: &mut CliMeshData, settings: QemSimplifyOptions) -> Result<(), Box<dyn std::error::Error>> {
+fn simplify_mesh(
+    mesh_data: &mut CliMeshData,
+    settings: QemSimplifyOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
     let context = qem_context_create();
     if context.is_null() {
         return Err("Failed to create qem context".into());
@@ -358,7 +367,9 @@ fn simplify_mesh(mesh_data: &mut CliMeshData, settings: QemSimplifyOptions) -> R
         .into());
     }
 
-    if mesh_data.num_attributes > 0 && mesh_data.attribute_weights.len() != mesh_data.num_attributes as usize {
+    if mesh_data.num_attributes > 0
+        && mesh_data.attribute_weights.len() != mesh_data.num_attributes as usize
+    {
         unsafe { qem_context_destroy(context) };
         return Err(format!(
             "Invalid attribute weights length {} for num_attributes {}",
@@ -408,7 +419,9 @@ fn simplify_mesh(mesh_data: &mut CliMeshData, settings: QemSimplifyOptions) -> R
         .vertices
         .truncate(result.num_vertices as usize * mesh_stride);
     mesh_data.indices.truncate(result.num_indices as usize);
-    mesh_data.material_ids.truncate(result.num_triangles as usize);
+    mesh_data
+        .material_ids
+        .truncate(result.num_triangles as usize);
     Ok(())
 }
 
@@ -431,7 +444,10 @@ fn load_obj(path: &Path) -> Result<CliMeshData, Box<dyn std::error::Error>> {
             let next_index = mesh_data.material_descriptors.len();
             mesh_data
                 .material_descriptors
-                .push(default_material_descriptor(format!("material_{}", next_index)));
+                .push(default_material_descriptor(format!(
+                    "material_{}",
+                    next_index
+                )));
         }
         for _ in 0..num_tris {
             mesh_data.material_ids.push(material_id);
@@ -455,7 +471,13 @@ fn save_obj(
     let mesh_stride = stride(num_attributes);
     for i in 0..(vertices.len() / mesh_stride) {
         let base = i * mesh_stride;
-        writeln!(writer, "v {} {} {}", vertices[base], vertices[base + 1], vertices[base + 2])?;
+        writeln!(
+            writer,
+            "v {} {} {}",
+            vertices[base],
+            vertices[base + 1],
+            vertices[base + 2]
+        )?;
     }
     for i in indices.chunks(3) {
         writeln!(writer, "f {} {} {}", i[0] + 1, i[1] + 1, i[2] + 1)?;
@@ -537,7 +559,9 @@ fn load_glb(path: &Path) -> Result<CliMeshData, Box<dyn std::error::Error>> {
                 None => continue,
             };
 
-            let normals = reader.read_normals().map(|iter| iter.collect::<Vec<[f32; 3]>>());
+            let normals = reader
+                .read_normals()
+                .map(|iter| iter.collect::<Vec<[f32; 3]>>());
             let texcoords = reader
                 .read_tex_coords(0)
                 .map(|iter| iter.into_f32().collect::<Vec<[f32; 2]>>());
@@ -728,17 +752,19 @@ fn save_glb(path: &Path, mesh_data: &CliMeshData) -> Result<(), Box<dyn std::err
                     target: None,
                 });
 
-                Some(root.push(json::Image {
-                    buffer_view: Some(image_buffer_view),
-                    mime_type: image_descriptor
-                        .mime_type
-                        .as_ref()
-                        .map(|mime| json::image::MimeType(mime.clone())),
-                    name: None,
-                    uri: None,
-                    extensions: Default::default(),
-                    extras: Default::default(),
-                }))
+                Some(
+                    root.push(json::Image {
+                        buffer_view: Some(image_buffer_view),
+                        mime_type: image_descriptor
+                            .mime_type
+                            .as_ref()
+                            .map(|mime| json::image::MimeType(mime.clone())),
+                        name: None,
+                        uri: None,
+                        extensions: Default::default(),
+                        extras: Default::default(),
+                    }),
+                )
             }
         } else {
             image_descriptor.uri.as_ref().map(|uri| {
@@ -940,7 +966,9 @@ fn save_glb(path: &Path, mesh_data: &CliMeshData) -> Result<(), Box<dyn std::err
                 .material_descriptors
                 .get(material_id as usize)
                 .cloned()
-                .unwrap_or_else(|| default_material_descriptor(format!("material_{}", material_id)));
+                .unwrap_or_else(|| {
+                    default_material_descriptor(format!("material_{}", material_id))
+                });
             root.push(build_json_material(&descriptor, &texture_index_map))
         });
 

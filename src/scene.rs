@@ -1683,7 +1683,8 @@ pub unsafe extern "C" fn qem_scene_graph_apply_decisions_ex(
         target_triangles += result.requested_triangles as u64;
         output_triangles += result.output_triangles as u64;
 
-        if result.status == QEM_STATUS_SUCCESS && result.output_triangles < result.source_triangles {
+        if result.status == QEM_STATUS_SUCCESS && result.output_triangles < result.source_triangles
+        {
             num_simplified_meshes += 1;
         } else if result.status != QEM_STATUS_SUCCESS && first_error == QEM_STATUS_SUCCESS {
             first_error = result.status;
